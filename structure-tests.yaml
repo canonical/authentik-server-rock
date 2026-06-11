@@ -11,10 +11,10 @@ fileExistenceTests:
 
   # ── Application binaries ────────────────────────────────────────────────────
   - name: "go server binary"
-    path: "/bin/authentik-server"
+    path: "/usr/bin/authentik-server"
     shouldExist: true
   - name: "rust worker binary"
-    path: "/bin/authentik"
+    path: "/usr/bin/authentik"
     shouldExist: true
   - name: "python3.14 interpreter"
     path: "/usr/bin/python3.14"
@@ -60,15 +60,6 @@ fileExistenceTests:
   - name: "packages symlink"
     path: "/packages"
     shouldExist: true
-  - name: "python wrapper script"
-    path: "/usr/local/bin/python"
-    shouldExist: true
-  - name: "python3 wrapper symlink"
-    path: "/usr/local/bin/python3"
-    shouldExist: true
-  - name: "authentik-server wrapper script"
-    path: "/usr/local/bin/authentik-server"
-    shouldExist: true
 
   # ── System files (critical for bare-base migration) ─────────────────────────
   - name: "etc passwd"
@@ -90,12 +81,44 @@ fileExistenceTests:
     path: "/etc/krb5.conf"
     shouldExist: true
 
+  # ── Runtime directories ─────────────────────────────────────────────────────
+  - name: "certs directory"
+    path: "/certs"
+    shouldExist: true
+  - name: "data directory"
+    path: "/data"
+    shouldExist: true
+  - name: "media directory"
+    path: "/media"
+    shouldExist: true
+  - name: "data/media symlink"
+    path: "/data/media"
+    shouldExist: true
+  - name: "authentik ssh directory"
+    path: "/authentik/.ssh"
+    shouldExist: true
+
 commandTests:
-  - name: "python version"
-    command: "/usr/bin/python3.14"
-    args: ["--version"]
-    expectedOutput: ["Python 3\\.14\\."]
   - name: "bash version"
     command: "/usr/bin/bash"
     args: ["--version"]
     expectedOutput: ["GNU bash"]
+  - name: "python interpreter version"
+    command: "/usr/bin/python3.14"
+    args: ["--version"]
+    expectedOutput: ["Python 3\\.14\\."]
+  - name: "compiled python extensions importable"
+    # Verifies that .so stripping with --strip-debug preserved PyInit_* symbols
+    # and that the venv site-packages are correctly activated.
+    command: "/ak-root/.venv/bin/python"
+    args: ["-c", "import cryptography, lxml, xmlsec, django, psycopg; print('OK')"]
+    expectedOutput: ["OK"]
+  - name: "go server binary executes"
+    command: "/usr/bin/authentik-server"
+    args: ["--help"]
+    exitCode: 0
+  - name: "coreutils mkdir present"
+    # lifecycle/ak calls mkdir -p at startup before any other command
+    command: "/usr/bin/mkdir"
+    args: ["--version"]
+    expectedOutput: ["GNU coreutils"]
