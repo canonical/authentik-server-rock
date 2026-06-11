@@ -1,0 +1,101 @@
+schemaVersion: 2.0.0
+
+fileExistenceTests:
+  # ── Build tools must NOT be present ────────────────────────────────────────
+  - name: "no go sdk"
+    path: "/usr/local/go"
+    shouldExist: false
+  - name: "no rust toolchain"
+    path: "/root/.cargo"
+    shouldExist: false
+
+  # ── Application binaries ────────────────────────────────────────────────────
+  - name: "go server binary"
+    path: "/bin/authentik-server"
+    shouldExist: true
+  - name: "rust worker binary"
+    path: "/bin/authentik"
+    shouldExist: true
+  - name: "python3.14 interpreter"
+    path: "/usr/bin/python3.14"
+    shouldExist: true
+  - name: "bash shell"
+    path: "/usr/bin/bash"
+    shouldExist: true
+
+  # ── Lifecycle entrypoint ────────────────────────────────────────────────────
+  - name: "lifecycle script"
+    path: "/lifecycle/ak"
+    shouldExist: true
+
+  # ── Web frontend ────────────────────────────────────────────────────────────
+  - name: "web ui dist"
+    path: "/web/dist"
+    shouldExist: true
+  - name: "web brand assets"
+    path: "/web/authentik"
+    shouldExist: true
+
+  # ── Django application source ───────────────────────────────────────────────
+  - name: "django app package"
+    path: "/authentik"
+    shouldExist: true
+  - name: "blueprints directory"
+    path: "/blueprints"
+    shouldExist: true
+  - name: "schemas directory"
+    path: "/schemas"
+    shouldExist: true
+  - name: "locale directory"
+    path: "/locale"
+    shouldExist: true
+  - name: "django manage.py"
+    path: "/manage.py"
+    shouldExist: true
+
+  # ── Python virtual environment ──────────────────────────────────────────────
+  - name: "python venv"
+    path: "/ak-root/.venv"
+    shouldExist: true
+  - name: "packages symlink"
+    path: "/packages"
+    shouldExist: true
+  - name: "python wrapper script"
+    path: "/usr/local/bin/python"
+    shouldExist: true
+  - name: "python3 wrapper symlink"
+    path: "/usr/local/bin/python3"
+    shouldExist: true
+  - name: "authentik-server wrapper script"
+    path: "/usr/local/bin/authentik-server"
+    shouldExist: true
+
+  # ── System files (critical for bare-base migration) ─────────────────────────
+  - name: "etc passwd"
+    path: "/etc/passwd"
+    shouldExist: true
+  - name: "etc group"
+    path: "/etc/group"
+    shouldExist: true
+  - name: "etc nsswitch.conf"
+    path: "/etc/nsswitch.conf"
+    shouldExist: true
+  - name: "ca certificates bundle"
+    path: "/etc/ssl/certs/ca-certificates.crt"
+    shouldExist: true
+  - name: "os-release"
+    path: "/etc/os-release"
+    shouldExist: true
+  - name: "krb5 config"
+    path: "/etc/krb5.conf"
+    shouldExist: true
+
+commandTests:
+  - name: "python version"
+    command: "/usr/bin/python3.14"
+    args: ["--version"]
+    expectedOutput: ["Python 3\\.14\\."]
+  - name: "bash version"
+    command: "/usr/bin/bash"
+    args: ["--version"]
+    expectedOutput: ["GNU bash"]

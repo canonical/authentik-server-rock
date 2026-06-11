@@ -1,0 +1,13 @@
+name: auto-approver
+run-name: CI for approving PR 
+
+on:
+  push:
+    branches:
+      - "renovate/**"
+
+jobs:
+  autoapprove:
+    uses: canonical/identity-team/.github/workflows/pr-auto-approval.yaml@6980fa34b31ca8631e6cb2d57980e7e035697a31 # v1.8.5
+    secrets:
+      PAT_TOKEN: ${{ secrets.PAT_TOKEN }}

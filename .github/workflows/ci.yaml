@@ -1,0 +1,63 @@
+name: ci
+run-name: CI for ${{ github.sha }} on ${{ github.ref_name }}
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "main"
+      - "release-**"
+    tags:
+      - "v**"
+    paths:
+      - "rockcraft.yaml"
+      - ".github/workflows/**.yaml"
+  pull_request:
+    branches:
+      - "*"
+
+jobs:
+  build:
+    uses: canonical/identity-team/.github/workflows/_rock-build.yaml@6980fa34b31ca8631e6cb2d57980e7e035697a31 # v1.8.5
+    with:
+      structure-tests-enabled: true
+  gh-publish:
+    if: ${{ (github.ref == 'refs/heads/main') || (github.ref_type == 'tag') }}
+    needs: build
+    uses: canonical/identity-team/.github/workflows/_rock-gh-publish.yaml@6980fa34b31ca8631e6cb2d57980e7e035697a31 # v1.8.5
+    with:
+      rock: ${{ needs.build.outputs.rock }}
+  oci-publish:
+    # only release to oci-factory in case of release
+    if: github.ref_type == 'tag'
+    needs: build
+    uses: canonical/identity-team/.github/workflows/_rock-oci-publish.yaml@6980fa34b31ca8631e6cb2d57980e7e035697a31 # v1.8.5
+    with:
+      edge-release: false
+      eol-stable-release: "3 month"
+    secrets:
+      PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
+  scan:
+    if: ${{ (github.ref == 'refs/heads/main') || (github.ref_type == 'tag') }}
+    needs: gh-publish
+    uses: canonical/identity-team/.github/workflows/_rock-scan.yaml@6980fa34b31ca8631e6cb2d57980e7e035697a31 # v1.8.5
+    with:
+      image: ${{ needs.gh-publish.outputs.image }}
+  oci-update-pr-server:
+    needs: [gh-publish, scan]
+    if: github.ref_type == 'tag'
+    uses: canonical/identity-team/.github/workflows/oci-update-pr.yaml@6980fa34b31ca8631e6cb2d57980e7e035697a31 # v1.8.5
+    with:
+        oci-image: ${{ needs.gh-publish.outputs.image }}
+        repository: canonical/authentik-server-operator
+    secrets:
+        PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
+  oci-update-pr-worker:
+    needs: [gh-publish, scan]
+    if: github.ref_type == 'tag'
+    uses: canonical/identity-team/.github/workflows/oci-update-pr.yaml@6980fa34b31ca8631e6cb2d57980e7e035697a31 # v1.8.5
+    with:
+        oci-image: ${{ needs.gh-publish.outputs.image }}
+        repository: canonical/authentik-worker-operator
+    secrets:
+        PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
