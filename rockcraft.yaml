@@ -205,6 +205,11 @@ parts:
           --python /usr/bin/python3.14 \
           --python-preference only-system
 
+      # Strip debug symbols from compiled extensions. Source-built Rust
+      # extensions (cryptography._rust.abi3.so in particular) are ~300 MB
+      # unstripped; stripping brings them to ~4 MB.
+      find /ak-root/.venv -name "*.so" -exec strip --strip-debug {} +
+
       mkdir -p "${CRAFT_PART_INSTALL}/ak-root"
       cp -a /ak-root/.venv "${CRAFT_PART_INSTALL}/ak-root/.venv"
     stage:
