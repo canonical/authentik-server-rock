@@ -22,6 +22,9 @@ jobs:
     with:
       structure-tests-enabled: true
   gh-publish:
+    permissions:
+      packages: write
+      contents: read
     if: ${{ (github.ref == 'refs/heads/main') || (github.ref_type == 'tag') }}
     needs: build
     uses: canonical/identity-team/.github/workflows/_rock-gh-publish.yaml@6980fa34b31ca8631e6cb2d57980e7e035697a31 # v1.8.5
@@ -29,7 +32,7 @@ jobs:
       rock: ${{ needs.build.outputs.rock }}
   oci-publish:
     # only release to oci-factory in case of release
-    if: github.ref_type == 'tag'
+    if: ${{ github.ref == 'refs/heads/main' }}
     needs: build
     uses: canonical/identity-team/.github/workflows/_rock-oci-publish.yaml@6980fa34b31ca8631e6cb2d57980e7e035697a31 # v1.8.5
     with:
@@ -38,12 +41,20 @@ jobs:
     secrets:
       PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
   scan:
+    permissions:
+      packages: read
+      contents: read
+      security-events: write
+      actions: read
     if: ${{ (github.ref == 'refs/heads/main') || (github.ref_type == 'tag') }}
     needs: gh-publish
     uses: canonical/identity-team/.github/workflows/_rock-scan.yaml@6980fa34b31ca8631e6cb2d57980e7e035697a31 # v1.8.5
     with:
       image: ${{ needs.gh-publish.outputs.image }}
   oci-update-pr-server:
+    permissions:
+      contents: write
+      pull-requests: write
     needs: [gh-publish, scan]
     if: github.ref_type == 'tag'
     uses: canonical/identity-team/.github/workflows/oci-update-pr.yaml@6980fa34b31ca8631e6cb2d57980e7e035697a31 # v1.8.5
@@ -53,6 +64,9 @@ jobs:
     secrets:
         PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
   oci-update-pr-worker:
+    permissions:
+      contents: write
+      pull-requests: write
     needs: [gh-publish, scan]
     if: github.ref_type == 'tag'
     uses: canonical/identity-team/.github/workflows/oci-update-pr.yaml@6980fa34b31ca8631e6cb2d57980e7e035697a31 # v1.8.5

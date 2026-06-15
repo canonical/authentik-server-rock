@@ -23,6 +23,9 @@ jobs:
             id: issues
 
     scheduled-check:
+        permissions:
+            contents: write
+            issues: write
         if: ${{ github.event_name == 'schedule' }}
         strategy:
             matrix:
@@ -34,5 +37,8 @@ jobs:
             issue: ${{ matrix.issue }}
 
     apply-labels:
+        permissions:
+            contents: write
+            issues: write
         uses: canonical/identity-team/.github/workflows/cve-check.yaml@6980fa34b31ca8631e6cb2d57980e7e035697a31 # v1.8.5
         if: ${{ github.event.issue.id }}
