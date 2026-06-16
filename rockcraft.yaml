@@ -1,0 +1,326 @@
+name: authentik-server
+base: bare
+build-base: ubuntu@26.04
+version: "2026.5.3"
+summary: authentik identity provider server
+description: |
+  authentik is an open-source Identity Provider focused on flexibility and
+  versatility. This rock bundles the authentik server (Go), worker (Rust/Python)
+  and all required runtimes.
+license: MIT
+
+run-user: _daemon_
+
+platforms:
+  amd64:
+
+services:
+  server:
+    override: replace
+    # ak calls wait_for_db before starting; Pebble restarts until DB is reachable.
+    command: /lifecycle/ak server
+    startup: disabled
+    working-dir: /
+    environment:
+      TMPDIR: /dev/shm/
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUNBUFFERED: "1"
+      VIRTUAL_ENV: /ak-root/.venv
+      VENV_PATH: /ak-root/.venv
+      PYTHONPATH: /
+      AK_RUNNING_IN_CONTAINER: "true"
+      GOFIPS: "1"
+      PATH: /lifecycle:/ak-root/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+  worker:
+    override: replace
+    command: /lifecycle/ak worker
+    startup: disabled
+    working-dir: /
+    environment:
+      TMPDIR: /dev/shm/
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUNBUFFERED: "1"
+      VIRTUAL_ENV: /ak-root/.venv
+      VENV_PATH: /ak-root/.venv
+      PYTHONPATH: /
+      AK_RUNNING_IN_CONTAINER: "true"
+      GOFIPS: "1"
+      PATH: /lifecycle:/ak-root/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+parts:
+  # ── Runtime shared libraries (chisel slices) ────────────────────────────────
+  # Packages that have slice definitions in the ubuntu-26.04 chisel-releases.
+  # rockcraft requires chisel slices and full packages to be in separate parts.
+  runtime-libs:
+    plugin: nil
+    stage-packages:
+      # CA bundle at /etc/ssl/certs/ca-certificates.crt; openssl_data pulled in
+      # transitively to set up the /etc/ssl/certs/cert.pem symlink.
+      - ca-certificates_data
+      # PostgreSQL client library (Django psycopg2 backend).
+      - libpq5_libs
+      # MaxMind GeoIP database library.
+      - libmaxminddb0_libs
+      # bash is required by lifecycle/ak which uses bash-specific syntax
+      # (#!/usr/bin/env bash shebang, [[ ]], set -o pipefail, $EUID).
+      - bash_bins
+      # /usr/bin/env is invoked by the shebang in lifecycle/ak.
+      - coreutils_env
+      # lifecycle/ak creates PROMETHEUS_MULTIPROC_DIR at startup.
+      - coreutils_mkdir
+      # lifecycle/ak reads the mode file via cat for healthcheck dispatch.
+      - coreutils_cat
+      # Python 3.14 interpreter + full standard library (Django needs the full stdlib).
+      # python3.14_standard transitively pulls in python3.14-minimal_bins (the
+      # interpreter binary) and all libpython3.14-stdlib slices.
+      - python3.14_standard
+      # /etc/os-release and distro identity files; also creates /etc/ and /usr/lib/ dirs.
+      - base-files_release-info
+      # /etc/passwd and /etc/group from master files (via chisel mutate script).
+      - base-passwd_data
+      # /etc/nsswitch.conf — needed by Python's socket library and glibc resolver.
+      - libc-bin_nsswitch
+
+  # ── Runtime shared libraries (full packages) ────────────────────────────────
+  # Packages that do NOT yet have slice definitions in ubuntu-26.04 chisel-releases
+  # are staged in full here. rockcraft forbids mixing slices and plain packages
+  # in a single stage-packages list, hence the separate part.
+  runtime-libs-full:
+    plugin: nil
+    stage-packages:
+      - libkadm5clnt-mit12       # Kerberos KADM5 client (MIT)
+      - libkadm5clnt7t64-heimdal # Kerberos KADM5 client (Heimdal)
+      - libltdl7                 # GNU Libtool DL library (libxmlsec1 plugin loader)
+      - libxslt1.1               # XSLT 1.0 processing library (lxml)
+      - libxmlsec1-1             # XML security library (python-xmlsec binding)
+      - libxmlsec1-openssl1      # OpenSSL engine for libxmlsec1
+      # authentik Rust worker embeds Python via PyO3 and links against
+      # libpython3.14.so.1.0 at runtime; no chisel slice exists for this package.
+      - libpython3.14
+
+  # ── Web UI (Node.js frontend) ─────────────────────────────────────────────────
+  # Builds web/dist/ (main UI) and web/authentik/ (brand assets).
+  # Both build commands run from web/ subdir; wireit orchestrates the vite build.
+  # node/24/stable is sufficient: package.json specifies "node": ">=24".
+  web-ui:
+    plugin: nil
+    source: https://github.com/goauthentik/authentik
+    source-type: git
+    source-tag: version/2026.5.3
+    source-depth: 1
+    build-snaps:
+      - node/24/stable
+    override-build: |
+      cd "${CRAFT_PART_SRC}/web"
+      npm ci
+
+      npm run build
+      npm run build:sfe
+
+      mkdir -p "${CRAFT_PART_INSTALL}/web"
+      cp -r "${CRAFT_PART_SRC}/web/dist/"      "${CRAFT_PART_INSTALL}/web/dist/"
+      cp -r "${CRAFT_PART_SRC}/web/authentik/" "${CRAFT_PART_INSTALL}/web/authentik/"
+    stage:
+      - web/dist/
+      - web/authentik/
+
+  # ── Go binary: authentik-server ──────────────────────────────────────────────
+  # HTTP server / reverse proxy frontend. CGO is required for GOFIPS140 support.
+  # robots.txt and security.txt are embedded via //go:embed and exist in the
+  # source repo, so this part does not depend on web-ui.
+  go-server:
+    plugin: go
+    source: https://github.com/goauthentik/authentik
+    source-type: git
+    source-tag: version/2026.5.3
+    source-depth: 1
+    build-snaps:
+      - go/1.26/stable
+    build-packages:
+      - gcc
+    build-environment:
+      - CGO_ENABLED: "1"
+      - GOFIPS140: "latest"
+    override-build: |
+      go mod download
+      mkdir -p "${CRAFT_PART_INSTALL}/usr/bin"
+      go build -ldflags="-s -w" -o "${CRAFT_PART_INSTALL}/usr/bin/authentik-server" ./cmd/server
+    stage:
+      - usr/bin/authentik-server
+
+  # ── Python virtual environment ────────────────────────────────────────────────
+  # Builds the Python venv at /ak-root/.venv using uv. Packages that require a
+  # Rust toolchain to compile (cryptography, python-kadmin-rs, xmlsec) are built
+  # from source; uv picks binary wheels for everything else.
+  python-deps:
+    plugin: nil
+    source: https://github.com/goauthentik/authentik
+    source-type: git
+    source-tag: version/2026.5.3
+    source-depth: 1
+    build-snaps:
+      - astral-uv/latest/stable
+    build-packages:
+      - build-essential
+      - pkg-config
+      - cmake
+      - libssl-dev
+      - libffi-dev
+      - libxml2-dev
+      - libxslt1-dev
+      - libxmlsec1-dev
+      - zlib1g-dev
+      - libpq-dev
+      - libkrb5-dev
+      - libclang-dev
+      - python3.14-dev
+      - python3.14-venv
+    override-build: |
+      # ── Rust toolchain ──────────────────────────────────────────────────────
+      # python-kadmin-rs and cryptography (source build) require Rust.
+      export RUSTUP_HOME="${CRAFT_PART_BUILD}/.rustup"
+      export CARGO_HOME="${CRAFT_PART_BUILD}/.cargo"
+      curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+        sh -s -- -y --default-toolchain 1.95.0 --no-modify-path \
+           --profile minimal 2>&1
+      export PATH="${CARGO_HOME}/bin:${PATH}"
+
+      rm -rf /ak-root
+      mkdir -p /ak-root
+      uv venv /ak-root/.venv --python /usr/bin/python3.14 --python-preference only-system
+
+      # Force source builds for packages that need Rust (FIPS/native extensions).
+      # UV_PROJECT_ENVIRONMENT tells uv where to create the project venv.
+      cd "${CRAFT_PART_SRC}"
+      UV_PROJECT_ENVIRONMENT=/ak-root/.venv \
+      UV_COMPILE_BYTECODE=1 \
+      UV_NO_BINARY_PACKAGE="cryptography lxml python-kadmin-rs xmlsec" \
+      CARGO_HOME="${CARGO_HOME}" \
+        uv sync \
+          --locked \
+          --no-install-project \
+          --no-dev \
+          --no-editable \
+          --python /usr/bin/python3.14 \
+          --python-preference only-system
+
+      # Strip debug symbols from compiled extensions. Source-built Rust
+      # extensions (cryptography._rust.abi3.so in particular) are ~300 MB
+      # unstripped; stripping brings them to ~4 MB.
+      find /ak-root/.venv -name "*.so" -exec strip --strip-debug {} +
+
+      mkdir -p "${CRAFT_PART_INSTALL}/ak-root"
+      cp -a /ak-root/.venv "${CRAFT_PART_INSTALL}/ak-root/.venv"
+    stage:
+      - ak-root/.venv/
+
+  # ── Rust worker binary ────────────────────────────────────────────────────────
+  # Builds the `authentik` Rust binary (the celery/worker process).
+  # aws-lc-rs FIPS requires cmake + clang + a Go toolchain.
+  # PyO3 (pyo3 = "0.28.3") embeds Python 3.14; PYO3_PYTHON must point at it.
+  rust-binary:
+    plugin: nil
+    source: https://github.com/goauthentik/authentik
+    source-type: git
+    source-tag: version/2026.5.3
+    source-depth: 1
+    build-snaps:
+      - go/1.26/stable
+    build-packages:
+      - build-essential
+      - cmake
+      - clang
+      - python3.14-dev
+      - libpython3.14-dev
+    build-environment:
+      # Required workaround for aws-lc-rs FIPS — see aws/aws-lc-rs#569
+      - AWS_LC_FIPS_SYS_CC: "clang"
+      - PYO3_PYTHON: "/usr/bin/python3.14"
+    override-build: |
+      # Install Rust 1.95.0 (pinned in rust-toolchain.toml)
+      export RUSTUP_HOME="${CRAFT_PART_BUILD}/.rustup"
+      export CARGO_HOME="${CRAFT_PART_BUILD}/.cargo"
+      curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+        sh -s -- -y --default-toolchain 1.95.0 --no-modify-path \
+           --profile minimal 2>&1
+      export PATH="${CARGO_HOME}/bin:${PATH}"
+
+      cd "${CRAFT_PART_SRC}"
+      cargo build \
+        --package authentik \
+        --no-default-features \
+        --features core \
+        --locked \
+        --release
+
+      mkdir -p "${CRAFT_PART_INSTALL}/usr/bin"
+      cp target/release/authentik "${CRAFT_PART_INSTALL}/usr/bin/authentik"
+      strip "${CRAFT_PART_INSTALL}/usr/bin/authentik"
+    stage:
+      - usr/bin/authentik
+
+  # Pulls the Django app, lifecycle scripts, blueprints, schemas, locale,
+  # local Python workspace packages, and krb5.conf from the authentik repo.
+  app-source:
+    plugin: dump
+    after:
+      - python-deps
+      - go-server
+      - rust-binary
+    source: https://github.com/goauthentik/authentik
+    source-type: git
+    source-tag: version/2026.5.3
+    source-depth: 1
+    organize:
+      # Workspace Python packages live at packages/ in the repo but need to be
+      # at ak-root/packages/ in the image (matching the upstream image layout).
+      packages: ak-root/packages
+      # krb5.conf is embedded deep in the source tree; surface it to /etc/.
+      authentik/sources/kerberos/krb5.conf: etc/krb5.conf
+    stage:
+      - authentik/
+      - ak-root/packages/
+      - lifecycle/
+      - blueprints/
+      - schemas/
+      - locale/
+      - manage.py
+      - pyproject.toml
+      - uv.lock
+      - etc/krb5.conf
+    override-prime: |
+      craftctl default
+      # Runtime directories expected by authentik (mirrors upstream Dockerfile).
+      # In k8s these are typically volume mounts, but must exist in the image
+      # so container start doesn't fail before volumes are attached.
+      mkdir -p "${CRAFT_PRIME}/certs" \
+               "${CRAFT_PRIME}/data" \
+               "${CRAFT_PRIME}/media" \
+               "${CRAFT_PRIME}/authentik/.ssh"
+      ln -sf /media "${CRAFT_PRIME}/data/media"
+      chown 584792:584792 "${CRAFT_PRIME}/certs" \
+                          "${CRAFT_PRIME}/data" \
+                          "${CRAFT_PRIME}/data/media" \
+                          "${CRAFT_PRIME}/media" \
+                          "${CRAFT_PRIME}/authentik/.ssh"
+      chmod 700 "${CRAFT_PRIME}/authentik/.ssh"
+      # Match upstream: chown authentik:authentik /ak-root. fnmatch-based permissions
+      # blocks only cover exact paths, so chown -R is the only reliable way to cover
+      # the full venv tree.
+      chown -R 584792:584792 "${CRAFT_PRIME}/ak-root"
+      ln -sf /ak-root/packages "${CRAFT_PRIME}/packages"
+
+  # ── Security manifest (Canonical standard) ────────────────────────────────
+  deb-security-manifest:
+    plugin: nil
+    after:
+      - runtime-libs
+      - runtime-libs-full
+    override-prime: |
+      set -x
+      mkdir -p $CRAFT_PRIME/usr/share/rocks/
+      (echo "# os-release" && cat /etc/os-release && echo "# dpkg-query" && \
+        dpkg-query --admindir=$CRAFT_PRIME/var/lib/dpkg/ \
+        -f '${db:Status-Abbrev},${binary:Package},${Version},${source:Package},${Source:Version}\n' \
+        -W) > $CRAFT_PRIME/usr/share/rocks/dpkg.query
