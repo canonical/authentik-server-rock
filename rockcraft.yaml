@@ -264,6 +264,10 @@ parts:
   # local Python workspace packages, and krb5.conf from the authentik repo.
   app-source:
     plugin: dump
+    after:
+      - python-deps
+      - go-server
+      - rust-binary
     source: https://github.com/goauthentik/authentik
     source-type: git
     source-tag: version/2026.5.3
