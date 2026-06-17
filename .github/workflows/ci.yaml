@@ -25,9 +25,9 @@ jobs:
     permissions:
       packages: write
       contents: read
-    if: ${{ (github.ref == 'refs/heads/main') || (github.ref_type == 'tag') }}
+    if: ${{ github.ref == 'refs/heads/main' }}
     needs: build
-    uses: canonical/identity-team/.github/workflows/_rock-gh-publish.yaml@6980fa34b31ca8631e6cb2d57980e7e035697a31 # v1.8.5
+    uses: canonical/identity-team/.github/workflows/_rock-gh-publish-third-party.yaml@59d4d2782bcb8fc2deea2aa08442e4c8603f2689 # v1.11.2
     with:
       rock: ${{ needs.build.outputs.rock }}
   oci-publish:
