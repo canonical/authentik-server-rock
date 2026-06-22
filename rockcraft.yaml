@@ -77,6 +77,8 @@ parts:
       - python3.14_standard
       # /etc/os-release and distro identity files; also creates /etc/ and /usr/lib/ dirs.
       - base-files_release-info
+      # /tmp/ with mode 01777 (sticky bit); the upstream base-files deb ships it this way.
+      - base-files_tmp
       # /etc/passwd and /etc/group from master files (via chisel mutate script).
       - base-passwd_data
       # /etc/nsswitch.conf — needed by Python's socket library and glibc resolver.
