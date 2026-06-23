@@ -1,0 +1,6 @@
+# False Positive: These CVEs were fixed years ago in goauthentik (by version 2024.8.0), 
+# and are already fully patched in our built version (version/2026.5.3).
+# The scanner falsely flags them on /usr/bin/authentik-server because Go's local compilation 
+# sets the main module version to `(devel)` / `0.0.0` inside BuildInfo.
+CVE-2024-42490
+CVE-2024-23647
