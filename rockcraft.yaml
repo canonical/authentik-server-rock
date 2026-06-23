@@ -146,6 +146,8 @@ parts:
       - GOFIPS140: "latest"
     override-build: |
       go mod download
+      go get -u golang.org/x/net
+      go mod tidy
       mkdir -p "${CRAFT_PART_INSTALL}/usr/bin"
       go build -ldflags="-s -w" -o "${CRAFT_PART_INSTALL}/usr/bin/authentik-server" ./cmd/server
     stage:
@@ -206,6 +208,17 @@ parts:
           --no-editable \
           --python /usr/bin/python3.14 \
           --python-preference only-system
+
+      # Upgrade vulnerable Python dependencies (CVE-2026-32597, CVE-2026-48526, GHSA-537c-gmf6-5ccf, GHSA-6v7p-g79w-8964, CVE-2026-44431, CVE-2026-44432)
+      UV_PROJECT_ENVIRONMENT=/ak-root/.venv \
+      UV_NO_BINARY_PACKAGE="cryptography" \
+      CARGO_HOME="${CARGO_HOME}" \
+        uv pip install \
+          --upgrade \
+          "PyJWT>=2.13.0" \
+          "cryptography>=48.0.1" \
+          "msgpack>=1.2.1" \
+          "urllib3>=2.7.0"
 
       # Strip debug symbols from compiled extensions. Source-built Rust
       # extensions (cryptography._rust.abi3.so in particular) are ~300 MB
