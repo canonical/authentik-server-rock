@@ -210,7 +210,7 @@ parts:
           --python-preference only-system
 
       # Upgrade vulnerable Python dependencies (CVE-2026-32597, CVE-2026-48526, GHSA-537c-gmf6-5ccf, GHSA-6v7p-g79w-8964, CVE-2026-44431, CVE-2026-44432)
-      UV_PROJECT_ENVIRONMENT=/ak-root/.venv \
+      VIRTUAL_ENV=/ak-root/.venv \
       UV_NO_BINARY_PACKAGE="cryptography" \
       CARGO_HOME="${CARGO_HOME}" \
         uv pip install \
