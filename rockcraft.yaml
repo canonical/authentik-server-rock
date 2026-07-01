@@ -13,6 +13,7 @@ run-user: _daemon_
 
 platforms:
   amd64:
+  arm64:
 
 services:
   server:
@@ -149,7 +150,7 @@ parts:
       go get -u golang.org/x/net
       go mod tidy
       mkdir -p "${CRAFT_PART_INSTALL}/usr/bin"
-      go build -ldflags="-s -w -X 'main.Version=2026.5.3'" -o "${CRAFT_PART_INSTALL}/usr/bin/authentik-server" ./cmd/server
+      GOARCH="${CRAFT_ARCH_BUILD_FOR}" go build -ldflags="-s -w -X 'main.Version=2026.5.3'" -o "${CRAFT_PART_INSTALL}/usr/bin/authentik-server" ./cmd/server
     stage:
       - usr/bin/authentik-server
 

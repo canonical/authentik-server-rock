@@ -17,29 +17,50 @@ on:
       - "*"
 
 jobs:
+  get-architectures:
+    runs-on: ubuntu-latest
+    outputs:
+      architectures: ${{ steps.parse.outputs.architectures }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - name: Parse platforms from rockcraft.yaml
+        id: parse
+        run: |
+          archs=$(yq -o=json -I=0 '.platforms | keys' rockcraft.yaml)
+          echo "Found architectures: $archs"
+          echo "architectures=$archs" >> "$GITHUB_OUTPUT"
+
   build:
-    uses: canonical/identity-team/.github/workflows/_rock-build.yaml@f18247249f506f3c9210b86e43a2c4dd063088c5 # v1.8.7
+    needs: get-architectures
+    strategy:
+      matrix:
+        architecture: ${{ fromJson(needs.get-architectures.outputs.architectures) }}
+    uses: canonical/identity-team/.github/workflows/_rock-build.yaml@d64b860c8679d3539f5f35f3d2494c419d8e41b5 # v1.12.2
     with:
       structure-tests-enabled: true
+      architecture: ${{ matrix.architecture }}
+
   gh-publish:
     permissions:
       packages: write
       contents: read
     if: ${{ github.ref == 'refs/heads/main' }}
     needs: build
-    uses: canonical/identity-team/.github/workflows/_rock-gh-publish-third-party.yaml@5830f3e6723de07cb5b7ccb6c84031d8b2964c62 # v1.11.4
-    with:
-      rock: ${{ needs.build.outputs.rock }}
+    uses: canonical/identity-team/.github/workflows/_rock-gh-publish-third-party.yaml@d64b860c8679d3539f5f35f3d2494c419d8e41b5 # v1.12.2
+
   oci-publish:
     # only release to oci-factory in case of release
     if: ${{ github.ref == 'refs/heads/main' }}
     needs: build
-    uses: canonical/identity-team/.github/workflows/_rock-oci-publish.yaml@f18247249f506f3c9210b86e43a2c4dd063088c5 # v1.8.7
+    uses: canonical/identity-team/.github/workflows/_rock-oci-publish.yaml@d64b860c8679d3539f5f35f3d2494c419d8e41b5 # v1.12.2
     with:
       edge-release: false
       eol-stable-release: "3 month"
     secrets:
       PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
+
   scan:
     permissions:
       packages: read
@@ -48,28 +69,30 @@ jobs:
       actions: read
     if: ${{ (github.ref == 'refs/heads/main') || (github.ref_type == 'tag') }}
     needs: gh-publish
-    uses: canonical/identity-team/.github/workflows/_rock-scan.yaml@f18247249f506f3c9210b86e43a2c4dd063088c5 # v1.8.7
+    uses: canonical/identity-team/.github/workflows/_rock-scan.yaml@d64b860c8679d3539f5f35f3d2494c419d8e41b5 # v1.12.2
     with:
       image: ${{ needs.gh-publish.outputs.image }}
+
   oci-update-pr-server:
     permissions:
       contents: write
       pull-requests: write
     needs: [gh-publish, scan]
     if: github.ref_type == 'tag'
-    uses: canonical/identity-team/.github/workflows/oci-update-pr.yaml@f18247249f506f3c9210b86e43a2c4dd063088c5 # v1.8.7
+    uses: canonical/identity-team/.github/workflows/oci-update-pr.yaml@d64b860c8679d3539f5f35f3d2494c419d8e41b5 # v1.12.2
     with:
         oci-image: ${{ needs.gh-publish.outputs.image }}
         repository: canonical/authentik-server-operator
     secrets:
         PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
+
   oci-update-pr-worker:
     permissions:
       contents: write
       pull-requests: write
     needs: [gh-publish, scan]
     if: github.ref_type == 'tag'
-    uses: canonical/identity-team/.github/workflows/oci-update-pr.yaml@f18247249f506f3c9210b86e43a2c4dd063088c5 # v1.8.7
+    uses: canonical/identity-team/.github/workflows/oci-update-pr.yaml@d64b860c8679d3539f5f35f3d2494c419d8e41b5 # v1.12.2
     with:
         oci-image: ${{ needs.gh-publish.outputs.image }}
         repository: canonical/authentik-worker-operator
