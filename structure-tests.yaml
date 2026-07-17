@@ -19,10 +19,10 @@ fileExistenceTests:
   - name: "python3.14 interpreter"
     path: "/usr/bin/python3.14"
     shouldExist: true
-  - name: "python3 symlink to venv"
+  - name: "python3 wrapper script"
     path: "/usr/bin/python3"
     shouldExist: true
-  - name: "python symlink to venv"
+  - name: "python wrapper script"
     path: "/usr/bin/python"
     shouldExist: true
   - name: "bash shell"
@@ -113,7 +113,7 @@ commandTests:
     command: "/usr/bin/python3.14"
     args: ["--version"]
     expectedOutput: ["Python 3\\.14\\."]
-  - name: "python3 symlink executes and runs imports"
+  - name: "python3 wrapper executes and runs imports"
     command: "/usr/bin/python3"
     args: ["-c", "import cryptography, django; print('OK')"]
     expectedOutput: ["OK"]
