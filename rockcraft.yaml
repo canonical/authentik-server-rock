@@ -327,6 +327,11 @@ parts:
       chown -R 584792:584792 "${CRAFT_PRIME}/ak-root"
       ln -sf /ak-root/packages "${CRAFT_PRIME}/packages"
 
+      # Symlink virtualenv python to standard locations for easier debugging and direct script executions
+      mkdir -p "${CRAFT_PRIME}/usr/bin"
+      ln -sf /ak-root/.venv/bin/python "${CRAFT_PRIME}/usr/bin/python3"
+      ln -sf /ak-root/.venv/bin/python "${CRAFT_PRIME}/usr/bin/python"
+
   # ── Security manifest (Canonical standard) ────────────────────────────────
   deb-security-manifest:
     plugin: nil
