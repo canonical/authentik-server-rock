@@ -327,12 +327,6 @@ parts:
       chown -R 584792:584792 "${CRAFT_PRIME}/ak-root"
       ln -sf /ak-root/packages "${CRAFT_PRIME}/packages"
 
-      # Create python and python3 wrapper scripts to standard locations for easier debugging and direct script executions
-      mkdir -p "${CRAFT_PRIME}/usr/bin"
-      printf '#!/bin/sh\nexec /ak-root/.venv/bin/python "$@"\n' > "${CRAFT_PRIME}/usr/bin/python3"
-      printf '#!/bin/sh\nexec /ak-root/.venv/bin/python "$@"\n' > "${CRAFT_PRIME}/usr/bin/python"
-      chmod +x "${CRAFT_PRIME}/usr/bin/python3" "${CRAFT_PRIME}/usr/bin/python"
-
   # ── Security manifest (Canonical standard) ────────────────────────────────
   deb-security-manifest:
     plugin: nil
