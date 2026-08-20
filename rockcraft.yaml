@@ -333,16 +333,9 @@ parts:
       chown -R 584792:584792 "${CRAFT_PRIME}/ak-root"
       ln -sf /ak-root/packages "${CRAFT_PRIME}/packages"
 
-  # ── Security manifest (Canonical standard) ────────────────────────────────
   deb-security-manifest:
-    plugin: nil
-    after:
-      - runtime-libs
-      - runtime-libs-full
-    override-prime: |
-      set -x
-      mkdir -p $CRAFT_PRIME/usr/share/rocks/
-      (echo "# os-release" && cat /etc/os-release && echo "# dpkg-query" && \
-        dpkg-query --admindir=$CRAFT_PRIME/var/lib/dpkg/ \
-        -f '${db:Status-Abbrev},${binary:Package},${Version},${source:Package},${Source:Version}\n' \
-        -W) > $CRAFT_PRIME/usr/share/rocks/dpkg.query
+    plugin: make
+    source: https://github.com/canonical/rocks-security-manifest
+    source-type: git
+    source-branch: main
+    override-prime: gen_manifest

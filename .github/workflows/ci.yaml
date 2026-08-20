@@ -1,4 +1,4 @@
-name: ci
+name: CI
 run-name: CI for ${{ github.sha }} on ${{ github.ref_name }}
 
 on:
@@ -43,11 +43,11 @@ jobs:
       architecture: ${{ matrix.architecture }}
 
   gh-publish:
+    if: ${{ github.ref == 'refs/heads/main' }}
+    needs: build
     permissions:
       packages: write
       contents: read
-    if: ${{ github.ref == 'refs/heads/main' }}
-    needs: build
     uses: canonical/identity-team/.github/workflows/_rock-gh-publish-third-party.yaml@1bf335af1d939c8543e53d376dd49d79126c2cd3 # v1.15.0
 
   oci-publish:
@@ -62,13 +62,13 @@ jobs:
       PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
 
   scan:
+    if: ${{ (github.ref == 'refs/heads/main') || (github.ref_type == 'tag') }}
+    needs: gh-publish
     permissions:
       packages: read
       contents: read
       security-events: write
       actions: read
-    if: ${{ (github.ref == 'refs/heads/main') || (github.ref_type == 'tag') }}
-    needs: gh-publish
     uses: canonical/identity-team/.github/workflows/_rock-scan.yaml@1bf335af1d939c8543e53d376dd49d79126c2cd3 # v1.15.0
     with:
       image: ${{ needs.gh-publish.outputs.image }}

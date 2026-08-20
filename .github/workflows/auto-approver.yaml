@@ -1,5 +1,5 @@
 name: auto-approver
-run-name: CI for approving PR 
+run-name: CI for approving PR
 
 on:
   push:
