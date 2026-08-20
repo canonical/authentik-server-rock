@@ -148,6 +148,8 @@ parts:
     override-build: |
       go mod download
       go get -u golang.org/x/net
+      go get -u golang.org/x/text
+      go get -u golang.org/x/crypto
       go mod tidy
       mkdir -p "${CRAFT_PART_INSTALL}/usr/bin"
       GOARCH="${CRAFT_ARCH_BUILD_FOR}" go build -ldflags="-s -w -X 'main.Version=2026.5.3'" -o "${CRAFT_PART_INSTALL}/usr/bin/authentik-server" ./cmd/server
@@ -210,15 +212,19 @@ parts:
           --python /usr/bin/python3.14 \
           --python-preference only-system
 
-      # Upgrade vulnerable Python dependencies (CVE-2026-32597, CVE-2026-48526, GHSA-537c-gmf6-5ccf, GHSA-6v7p-g79w-8964, CVE-2026-44431, CVE-2026-44432)
+      # Upgrade vulnerable Python dependencies (CVE-2026-32597, CVE-2026-48526, GHSA-537c-gmf6-5ccf, GHSA-6v7p-g79w-8964, CVE-2026-44431, CVE-2026-44432, CVE-2026-69244, CVE-2026-69247, CVE-2026-59939, CVE-2026-59884, CVE-2026-59885, CVE-2026-59886, CVE-2026-54284, CVE-2026-59893, CVE-2026-71491)
       VIRTUAL_ENV=/ak-root/.venv \
       UV_NO_BINARY_PACKAGE="cryptography" \
       CARGO_HOME="${CARGO_HOME}" \
         uv pip install \
           --upgrade \
           "PyJWT>=2.13.0" \
-          "cryptography>=48.0.1" \
+          "aiohttp>=3.14.3" \
+          "cryptography>=50.0.0" \
+          "httplib2>=0.32.0" \
           "msgpack>=1.2.1" \
+          "pyasn1>=0.6.4" \
+          "sqlparse>=0.6.0" \
           "urllib3>=2.7.0"
 
       # Strip debug symbols from compiled extensions. Source-built Rust
