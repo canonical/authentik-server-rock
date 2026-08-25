@@ -37,7 +37,7 @@ jobs:
     strategy:
       matrix:
         architecture: ${{ fromJson(needs.get-architectures.outputs.architectures) }}
-    uses: canonical/identity-team/.github/workflows/_rock-build.yaml@1bf335af1d939c8543e53d376dd49d79126c2cd3 # v1.15.0
+    uses: canonical/identity-team/.github/workflows/_rock-build.yaml@e017941885bd1d17774bf7be2cbbb1d1abe80d9e # v1.16.0
     with:
       structure-tests-enabled: true
       architecture: ${{ matrix.architecture }}
@@ -48,13 +48,13 @@ jobs:
       contents: read
     if: ${{ github.ref == 'refs/heads/main' }}
     needs: build
-    uses: canonical/identity-team/.github/workflows/_rock-gh-publish-third-party.yaml@1bf335af1d939c8543e53d376dd49d79126c2cd3 # v1.15.0
+    uses: canonical/identity-team/.github/workflows/_rock-gh-publish-third-party.yaml@e017941885bd1d17774bf7be2cbbb1d1abe80d9e # v1.16.0
 
   oci-publish:
     # only release to oci-factory in case of release
     if: ${{ github.ref == 'refs/heads/main' }}
     needs: build
-    uses: canonical/identity-team/.github/workflows/_rock-oci-publish.yaml@1bf335af1d939c8543e53d376dd49d79126c2cd3 # v1.15.0
+    uses: canonical/identity-team/.github/workflows/_rock-oci-publish.yaml@e017941885bd1d17774bf7be2cbbb1d1abe80d9e # v1.16.0
     with:
       edge-release: false
       eol-stable-release: "3 month"
@@ -69,7 +69,7 @@ jobs:
       actions: read
     if: ${{ (github.ref == 'refs/heads/main') || (github.ref_type == 'tag') }}
     needs: gh-publish
-    uses: canonical/identity-team/.github/workflows/_rock-scan.yaml@1bf335af1d939c8543e53d376dd49d79126c2cd3 # v1.15.0
+    uses: canonical/identity-team/.github/workflows/_rock-scan.yaml@e017941885bd1d17774bf7be2cbbb1d1abe80d9e # v1.16.0
     with:
       image: ${{ needs.gh-publish.outputs.image }}
 
@@ -79,7 +79,7 @@ jobs:
       pull-requests: write
     needs: [gh-publish, scan]
     if: github.ref_type == 'tag'
-    uses: canonical/identity-team/.github/workflows/oci-update-pr.yaml@1bf335af1d939c8543e53d376dd49d79126c2cd3 # v1.15.0
+    uses: canonical/identity-team/.github/workflows/oci-update-pr.yaml@e017941885bd1d17774bf7be2cbbb1d1abe80d9e # v1.16.0
     with:
         oci-image: ${{ needs.gh-publish.outputs.image }}
         repository: canonical/authentik-server-operator
@@ -92,7 +92,7 @@ jobs:
       pull-requests: write
     needs: [gh-publish, scan]
     if: github.ref_type == 'tag'
-    uses: canonical/identity-team/.github/workflows/oci-update-pr.yaml@1bf335af1d939c8543e53d376dd49d79126c2cd3 # v1.15.0
+    uses: canonical/identity-team/.github/workflows/oci-update-pr.yaml@e017941885bd1d17774bf7be2cbbb1d1abe80d9e # v1.16.0
     with:
         oci-image: ${{ needs.gh-publish.outputs.image }}
         repository: canonical/authentik-worker-operator
