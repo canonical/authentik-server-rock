@@ -58,6 +58,7 @@ jobs:
     with:
       edge-release: false
       eol-stable-release: "3 month"
+      ubuntu-base-version: "26.04"
     secrets:
       PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
 
