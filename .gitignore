@@ -19,3 +19,9 @@ gen
 
 # Built Visual Studio Code Extensions
 *.vsix
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.artifacts/
