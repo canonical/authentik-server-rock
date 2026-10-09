@@ -1,0 +1,196 @@
+name: Check Upstream Release
+
+on:
+  schedule:
+    # Run daily Monday through Friday at 06:00 UTC
+    - cron: '0 6 * * 1-5'
+  workflow_dispatch:
+    inputs:
+      target_version:
+        description: 'Specific upstream version to target (e.g. 2026.8.3). Leave empty to check latest.'
+        required: false
+        type: string
+      dry_run:
+        description: 'Dry run: do not commit, push branch, or open PRs/issues.'
+        required: false
+        default: false
+        type: boolean
+      force:
+        description: 'Force re-running analysis and opening PR even if one already exists.'
+        required: false
+        default: false
+        type: boolean
+      model:
+        description: 'Gemini/OpenRouter model to use (default: gemini-3.8-flash / google/gemini-3.8-flash).'
+        required: false
+        type: string
+      strategy:
+        description: 'Upgrade strategy: next-minor (safe sequential upgrade) or latest'
+        required: false
+        default: 'next-minor'
+        type: choice
+        options:
+          - next-minor
+          - latest
+
+concurrency:
+  group: check-upstream
+  cancel-in-progress: false
+
+jobs:
+  check-and-update:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          token: ${{ secrets.PAT_TOKEN || github.token }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r scripts/requirements.txt
+
+      - name: Run script unit tests
+        run: python3 -m unittest discover -s tests
+
+      - name: Check upstream Authentik release
+        id: checker
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.PAT_TOKEN || github.token }}
+          TARGET_VERSION: ${{ inputs.target_version }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          FORCE: ${{ inputs.force }}
+          MODEL: ${{ inputs.model }}
+          STRATEGY: ${{ inputs.strategy || 'next-minor' }}
+        run: |
+          mkdir -p .artifacts
+          cmd=(python3 scripts/check_upstream_release.py --out-dir .artifacts --update-rockcraft)
+          if [ -n "$TARGET_VERSION" ]; then
+            cmd+=(--target-version "$TARGET_VERSION")
+          fi
+          if [ "$DRY_RUN" = "true" ]; then
+            cmd+=(--dry-run)
+          fi
+          if [ "$FORCE" = "true" ]; then
+            cmd+=(--force)
+          fi
+          if [ -n "$MODEL" ]; then
+            cmd+=(--gemini-model "$MODEL" --openrouter-model "$MODEL")
+          fi
+          if [ -n "$STRATEGY" ]; then
+            cmd+=(--strategy "$STRATEGY")
+          fi
+          "${cmd[@]}"
+
+      - name: Create branch and open PR on rockcraft repo
+        id: rock_pr
+        if: ${{ steps.checker.outputs.has_new_release == 'true' && !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN || github.token }}
+          HAS_PAT: ${{ secrets.PAT_TOKEN != '' }}
+          NEW_VER: ${{ steps.checker.outputs.new_version }}
+          BRANCH: ${{ steps.checker.outputs.pr_branch }}
+        run: |
+          if [ "$HAS_PAT" = "true" ]; then
+            echo "Configuring git author as canonical-iam..."
+            git config user.name "canonical-iam"
+            git config user.email "canonical-iam@users.noreply.github.com"
+          else
+            echo "Configuring git author as github-actions[bot]..."
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          fi
+
+          # Check if a PR for this branch already exists (open, merged, or closed)
+          existing_pr=$(gh pr list --head "${BRANCH}" --state all --json url -q '.[0].url')
+          if [ -n "$existing_pr" ]; then
+            echo "PR for branch ${BRANCH} already exists: ${existing_pr}. Skipping PR creation."
+            echo "pr_url=${existing_pr}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Safe checkout whether branch exists on remote or not
+          if git ls-remote --heads origin "${BRANCH}" | grep -q "${BRANCH}"; then
+            echo "Remote branch ${BRANCH} already exists. Checking it out..."
+            git fetch origin "${BRANCH}:${BRANCH}"
+            git checkout "${BRANCH}"
+          else
+            git checkout -b "${BRANCH}"
+          fi
+
+          git add rockcraft.yaml
+          if git diff --staged --quiet; then
+            echo "No changes to commit in rockcraft.yaml."
+          else
+            git commit -m "chore(deps): update authentik to v${NEW_VER}"
+            git push -u origin "${BRANCH}"
+          fi
+
+          pr_url=$(gh pr create \
+            --head "${BRANCH}" \
+            --base main \
+            --title "chore(deps): update authentik to v${NEW_VER}" \
+            --body-file .artifacts/rockcraft_pr_body.md)
+
+          echo "Created PR: ${pr_url}"
+          echo "pr_url=${pr_url}" >> "$GITHUB_OUTPUT"
+
+      - name: Link Rockcraft PR in Charm Issue specification
+        if: ${{ steps.checker.outputs.has_new_release == 'true' && !inputs.dry_run }}
+        env:
+          ROCK_PR_URL: ${{ steps.rock_pr.outputs.pr_url }}
+        run: |
+          if [ -n "$ROCK_PR_URL" ] && [ -f .artifacts/charm_issue_body.md ]; then
+            sed -i "s|Pending Rockcraft PR|${ROCK_PR_URL}|g" .artifacts/charm_issue_body.md
+          fi
+
+      - name: Open Issue on authentik-server-operator
+        if: ${{ steps.checker.outputs.has_new_release == 'true' && !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN || github.token }}
+          NEW_VER: ${{ steps.checker.outputs.new_version }}
+        run: |
+          repo="canonical/authentik-server-operator"
+          title="Upgrade to Authentik v${NEW_VER}: Migration & Test Specification"
+          existing_issue=$(gh issue list --repo "$repo" --search "Upgrade to Authentik v${NEW_VER} in:title" --state all --json number -q '.[0].number')
+          if [ -n "$existing_issue" ]; then
+            echo "Issue already exists on ${repo} (#${existing_issue}). Skipping."
+          else
+            echo "Creating issue on ${repo}..."
+            gh issue create \
+              --repo "$repo" \
+              --title "$title" \
+              --label "enhancement" \
+              --body-file .artifacts/charm_issue_body.md || echo "::warning::Failed to create issue on ${repo}. Ensure PAT_TOKEN has cross-repo issues:write scope."
+          fi
+
+      - name: Open Issue on authentik-worker-operator
+        if: ${{ steps.checker.outputs.has_new_release == 'true' && !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN || github.token }}
+          NEW_VER: ${{ steps.checker.outputs.new_version }}
+        run: |
+          repo="canonical/authentik-worker-operator"
+          title="Upgrade to Authentik v${NEW_VER}: Migration & Test Specification"
+          existing_issue=$(gh issue list --repo "$repo" --search "Upgrade to Authentik v${NEW_VER} in:title" --state all --json number -q '.[0].number')
+          if [ -n "$existing_issue" ]; then
+            echo "Issue already exists on ${repo} (#${existing_issue}). Skipping."
+          else
+            echo "Creating issue on ${repo}..."
+            gh issue create \
+              --repo "$repo" \
+              --title "$title" \
+              --label "enhancement" \
+              --body-file .artifacts/charm_issue_body.md || echo "::warning::Failed to create issue on ${repo}. Ensure PAT_TOKEN has cross-repo issues:write scope."
+          fi
