@@ -86,6 +86,7 @@ class Charm:
     container: str
     service: str
     description: str  # what the LLM is told about it
+    files: tuple[str, ...]  # where it decides how authentik is configured and run
 
 
 CHARMS = (
@@ -105,6 +106,16 @@ CHARMS = (
             "applications related over `oauth`, and shares the secret key and the "
             "database settings with the worker charm over `authentik-cluster`."
         ),
+        files=(
+            "charmcraft.yaml",
+            "src/constants.py",
+            "src/env_vars.py",
+            "src/configs.py",
+            "src/integrations.py",
+            "src/services.py",
+            "src/cli.py",
+            "src/authentik_api.py",
+        ),
     ),
     Charm(
         key="worker",
@@ -117,6 +128,14 @@ CHARMS = (
             "image. It receives AUTHENTIK_SECRET_KEY and the PostgreSQL settings from the "
             "server charm over `authentik-cluster` and sets AUTHENTIK_* environment "
             "variables in its Pebble layer."
+        ),
+        files=(
+            "charmcraft.yaml",
+            "src/constants.py",
+            "src/env_vars.py",
+            "src/configs.py",
+            "src/integrations.py",
+            "src/services.py",
         ),
     ),
 )
@@ -174,6 +193,26 @@ def upstream_file(version: Version, path: str) -> str | None:
     return http_get(
         f"https://raw.githubusercontent.com/{UPSTREAM_REPO}/{TAG_PREFIX}{version}/{path}"
     )
+
+
+def charm_file(charm: Charm, path: str) -> str | None:
+    """A file from a charm's default branch."""
+    return http_get(f"https://raw.githubusercontent.com/{charm.repo}/HEAD/{path}")
+
+
+def read_charm_files(
+    fetch: Callable[[Charm, str], str | None],
+) -> list[tuple[Charm, str, str]]:
+    """The files of every charm that say how it configures and runs authentik."""
+    found = []
+    for charm in CHARMS:
+        for path in charm.files:
+            text = fetch(charm, path)
+            if text is None:
+                print(f"::warning::{charm.repo} has no {path}; update CHARMS in {__file__}")
+            else:
+                found.append((charm, path, text))
+    return found
 
 
 def notes_path(series: Series) -> str:
@@ -337,6 +376,7 @@ Fetch = Callable[[Version, str], "str | None"]
 class BuildInputs:
     facts: tuple[tuple[Probe, str | None, str | None], ...]  # probe, before, after
     diffs: tuple[tuple[str, str], ...]  # path and unified diff of each changed file
+    files: tuple[tuple[str, str], ...]  # path and full text of each at the new version
 
     @property
     def changed(self) -> bool:
@@ -354,9 +394,11 @@ def compare_build_inputs(frm: Version, to: Version, fetch: Fetch) -> BuildInputs
             return None
 
     facts = tuple((probe, read(probe, frm), read(probe, to)) for probe in PROBES)
-    diffs = []
+    diffs, files = [], []
     for path in DIFFED_FILES:
         old, new = fetch(frm, path), fetch(to, path)
+        if new is not None:
+            files.append((path, new))
         if old != new:
             lines = difflib.unified_diff(
                 (old or "").splitlines(),
@@ -367,7 +409,7 @@ def compare_build_inputs(frm: Version, to: Version, fetch: Fetch) -> BuildInputs
                 lineterm="",
             )
             diffs.append((path, "\n".join(lines)))
-    return BuildInputs(facts, tuple(diffs))
+    return BuildInputs(facts, tuple(diffs), tuple(files))
 
 
 # Text handling
@@ -431,6 +473,7 @@ def render(template: str, values: Mapping[str, str]) -> str:
 # LLM analysis
 
 RISK_LEVELS = ("low", "medium", "high")
+MAX_FILE_CHARS = 30_000  # per upstream or charm file shown to the model
 # Bounds on what one analysis can add to a comment or an issue.
 MAX_ITEMS = 10
 MAX_FIELD_CHARS = 800
@@ -626,7 +669,11 @@ def system_prompt() -> str:
 
 
 def user_prompt(
-    path: UpgradePath, inputs: BuildInputs, notes: Mapping[Series, str], rockcraft: str
+    path: UpgradePath,
+    inputs: BuildInputs,
+    notes: Mapping[Series, str],
+    rockcraft: str,
+    charm_files: Iterable[tuple[Charm, str, str]],
 ) -> str:
     """Everything the model may base its analysis on.
 
@@ -650,10 +697,24 @@ def user_prompt(
         f"# Build inputs\n\nRead from upstream's source at both tags.\n\n{facts}",
     ]
     parts += [
-        untrusted(f"diff of {name} between the tags", clip(diff, 30_000))
+        untrusted(f"diff of {name} between the tags", clip(diff, MAX_FILE_CHARS))
         for name, diff in inputs.diffs
     ]
+    # A diff shows what moved, not what is still there, so the whole files go too.
+    parts += [
+        untrusted(f"{name} at {path.to}, complete", clip(text, MAX_FILE_CHARS))
+        for name, text in inputs.files
+    ]
     parts.append(f"# The rock's current rockcraft.yaml\n\n<rockcraft>\n{rockcraft}\n</rockcraft>")
+    parts.append(
+        "# How the charms configure and run authentik\n\n"
+        "Files from each charm's default branch."
+    )
+    parts += [
+        f'<charm-file charm="{charm.key}" path="{name}">\n'
+        f"{clip(text, MAX_FILE_CHARS)}\n</charm-file>"
+        for charm, name, text in charm_files
+    ]
     parts.append("# Upstream release notes absorbed by this upgrade")
     parts += [
         untrusted(f"{series_name(series)} release notes", text or "(none found)")
@@ -917,12 +978,16 @@ def main(argv: list[str] | None = None) -> int:
     }
 
     providers = providers_from_env(os.environ)
-    analysis, model, failures = analyse(
-        providers,
-        system_prompt(),
-        user_prompt(path, inputs, notes, args.rockcraft.read_text(encoding="utf-8")),
-        http_post_json,
-    )
+    analysis, model, failures = None, "", []
+    if providers:
+        prompt = user_prompt(
+            path,
+            inputs,
+            notes,
+            args.rockcraft.read_text(encoding="utf-8"),
+            read_charm_files(charm_file),
+        )
+        analysis, model, failures = analyse(providers, system_prompt(), prompt, http_post_json)
     for failure in failures:
         print(f"::warning::LLM analysis failed with {failure}")
     if analysis:

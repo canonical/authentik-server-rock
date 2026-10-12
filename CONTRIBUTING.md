@@ -53,6 +53,10 @@ Moving the rock to a new authentik release is driven by three pieces:
    run. A series bump always opens issues; a patch bump only does when its
    risk is not low.
 
+The LLM is shown the upstream release notes and build files, `rockcraft.yaml`,
+and the files of each charm that decide how it configures and runs authentik.
+Those files are listed per charm in `CHARMS` in `scripts/upstream_upgrade.py`.
+
 The LLM needs the `OPENROUTER_CI_KEY` or a `GEMINI_API_KEY` repository secret,
 and its model can be changed with the `OPENROUTER_MODEL` or `GEMINI_MODEL`
 repository variables. Without a key the pull request comment still shows the
