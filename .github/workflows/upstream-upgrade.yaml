@@ -81,3 +81,14 @@ jobs:
           else
             gh api --silent --method POST "$comments" --input "$RUNNER_TEMP/comment.json"
           fi
+
+      # Trial only: print everything the script generated, including the issues
+      # that would be opened on the charms after a merge.
+      - name: Show generated files
+        if: ${{ steps.analysis.outputs.changed == 'true' }}
+        run: |
+          for file in "$RUNNER_TEMP"/upgrade/*; do
+            echo "=====BEGIN $(basename "$file")====="
+            cat "$file"
+            echo "=====END $(basename "$file")====="
+          done
