@@ -284,6 +284,8 @@ class SanitizeTest(unittest.TestCase):
         self.assertNotIn("@canonical", clean)
         self.assertNotIn("#123", clean)
         self.assertNotIn("#456", clean)
+        self.assertEqual(uu.sanitize("use pnpm@12.4.0 (cc @someone)").count("\u200b"), 1)
+        self.assertIn("pnpm@12.4.0", uu.sanitize("use pnpm@12.4.0 (cc @someone)"))
 
     def test_only_upstream_links_survive(self):
         clean = uu.sanitize(

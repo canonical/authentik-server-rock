@@ -445,7 +445,8 @@ def sanitize(text: object, limit: int = 600) -> str:
     line = URL_RE.sub(_vet_url, line)
     line = line.replace("```", "`")
     line = re.sub(r"<(?=[!/?A-Za-z])", "<" + ZERO_WIDTH_SPACE, line)
-    line = re.sub(r"@(?=\w)", "@" + ZERO_WIDTH_SPACE, line)
+    # Only an @ at the start of a word is a mention; "pnpm@12" is left readable.
+    line = re.sub(r"(?<!\w)@(?=\w)", "@" + ZERO_WIDTH_SPACE, line)
     line = re.sub(r"#(?=\d)", "#" + ZERO_WIDTH_SPACE, line)
     return clip(line, limit)
 
