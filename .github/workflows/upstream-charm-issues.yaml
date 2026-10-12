@@ -1,0 +1,127 @@
+name: Upstream charm upgrade issues
+run-name: Charm upgrade issues for ${{ inputs.image || github.ref_name }}
+
+# When the rock is published with a new upstream version, open an issue on each
+# charm that describes the upgrade and what has to be validated. Called from
+# ci.yaml after the image is pushed; run it by hand to preview the issues or to
+# file them again for a specific pair of versions.
+
+on:
+  workflow_call:
+    inputs:
+      image:
+        description: "Published image the charms should move to"
+        type: string
+        required: true
+      from-version:
+        description: "Upstream version the rock built before (default: the one before this push)"
+        type: string
+        required: false
+        default: ""
+      dry-run:
+        description: "Generate the issues without opening them"
+        type: boolean
+        required: false
+        default: false
+    secrets:
+      PAT_TOKEN:
+        required: true
+      GEMINI_API_KEY:
+        required: false
+      OPENROUTER_API_KEY:
+        required: false
+  workflow_dispatch:
+    inputs:
+      from-version:
+        description: "Upstream version the charms are on, e.g. 2026.5.3"
+        type: string
+        required: true
+      image:
+        description: "Published image (default: the one for the version in rockcraft.yaml)"
+        type: string
+        required: false
+        default: ""
+      dry-run:
+        description: "Generate the issues without opening them"
+        type: boolean
+        required: false
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  open-issues:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Analyse the upgrade
+        id: analysis
+        env:
+          FROM_VERSION: ${{ inputs.from-version }}
+          BEFORE_SHA: ${{ github.event.before }}
+          IMAGE: ${{ inputs.image }}
+          GH_TOKEN: ${{ github.token }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
+          OPENROUTER_MODEL: ${{ vars.OPENROUTER_MODEL }}
+        run: |
+          # The issues are the LLM's output, so fail rather than file empty ones.
+          args=(--require-llm --out-dir "$RUNNER_TEMP/upgrade")
+          if [ -n "$IMAGE" ]; then
+            args+=(--image "$IMAGE")
+          fi
+          if [ -n "$FROM_VERSION" ]; then
+            args+=(--from "$FROM_VERSION")
+          else
+            git fetch --quiet --depth=1 origin "$BEFORE_SHA"
+            git show "$BEFORE_SHA:rockcraft.yaml" > "$RUNNER_TEMP/previous-rockcraft.yaml"
+            args+=(--from-rockcraft "$RUNNER_TEMP/previous-rockcraft.yaml")
+          fi
+
+          # Point the issues at the pull request that bumped the rock.
+          rock_change=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/pulls" \
+            --jq '.[0].html_url // empty')
+          commit_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}"
+          args+=(--rock-change "${rock_change:-$commit_url}")
+
+          python3 scripts/upstream_upgrade.py "${args[@]}"
+
+      - name: Open the charm issues
+        if: ${{ steps.analysis.outputs.open_charm_issues == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+          DRY_RUN: ${{ inputs.dry-run }}
+        run: |
+          while IFS=$'\t' read -r repo title body_file; do
+            {
+              echo "# ${repo}: ${title}"
+              echo
+              cat "$body_file"
+              echo
+            } >> "$GITHUB_STEP_SUMMARY"
+
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "Dry run: not opening \"${title}\" on ${repo}."
+              continue
+            fi
+
+            # One issue per upstream version, whatever its state.
+            existing=$(gh issue list --repo "$repo" --state all \
+              --search "in:title \"${title}\"" --json number,title |
+              jq -r --arg title "$title" 'map(select(.title == $title)) | .[0].number // empty')
+            if [ -n "$existing" ]; then
+              echo "${repo}#${existing} already tracks this upgrade."
+            else
+              # The enhancement label is what syncs the issue to Jira.
+              gh issue create --repo "$repo" --title "$title" --label enhancement \
+                --body-file "$body_file"
+            fi
+          done < <(jq -r '.[] | [.repo, .title, .body_file] | @tsv' \
+            "$RUNNER_TEMP/upgrade/charm_issues.json")

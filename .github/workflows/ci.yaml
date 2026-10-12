@@ -99,3 +99,18 @@ jobs:
         repository: canonical/authentik-worker-operator
     secrets:
         PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
+
+  charm-upgrade-issues:
+    # Once an image with a new upstream version is published, tell the charms.
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    needs: gh-publish
+    permissions:
+      contents: read
+      pull-requests: read
+    uses: ./.github/workflows/upstream-charm-issues.yaml
+    with:
+      image: ${{ needs.gh-publish.outputs.image }}
+    secrets:
+      PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
