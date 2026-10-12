@@ -32,7 +32,7 @@ import urllib.request
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Callable, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping, TypeVar
 
 # What this rock tracks. These are the parts to turn into inputs when the tooling
 # moves to a shared workflow.
@@ -122,15 +122,46 @@ CHARMS = (
 )
 
 
-# Upstream access
+# Network access
+
+ATTEMPTS = 3
+TRANSIENT_STATUSES = (408, 429, 500, 502, 503, 504)
+T = TypeVar("T")
+
+
+def is_transient(error: Exception) -> bool:
+    """Whether a failed request or git call is worth trying again."""
+    if isinstance(error, urllib.error.HTTPError):
+        return error.code in TRANSIENT_STATUSES
+    # Connection failures and timeouts, and git not reaching the remote.
+    return isinstance(error, (OSError, subprocess.SubprocessError))
+
+
+def retrying(call: Callable[[], T]) -> T:
+    """Run a network call, waiting and trying again when it fails temporarily."""
+    for attempt in range(1, ATTEMPTS):
+        try:
+            return call()
+        except Exception as error:
+            if not is_transient(error):
+                raise
+        time.sleep(5 * attempt)
+    return call()
+
+
+def read_url(request: urllib.request.Request, timeout: int) -> bytes:
+    def read() -> bytes:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return response.read()
+
+    return retrying(read)
 
 
 def http_get(url: str) -> str | None:
     """Return the body at a URL, or None when it does not exist."""
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            return response.read().decode("utf-8")
+        return read_url(request, timeout=30).decode("utf-8")
     except urllib.error.HTTPError as error:
         if error.code == 404:
             return None
@@ -158,19 +189,16 @@ def release_notes(series: Series) -> str | None:
 
 def list_released_versions() -> list[Version]:
     """Every final release upstream has tagged."""
-    output = subprocess.run(
-        [
-            "git",
-            "ls-remote",
-            "--tags",
-            "--refs",
-            f"https://github.com/{UPSTREAM_REPO}",
-            f"refs/tags/{TAG_PREFIX}*",
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=60,
+    command = [
+        "git",
+        "ls-remote",
+        "--tags",
+        "--refs",
+        f"https://github.com/{UPSTREAM_REPO}",
+        f"refs/tags/{TAG_PREFIX}*",
+    ]
+    output = retrying(
+        lambda: subprocess.run(command, check=True, capture_output=True, text=True, timeout=60)
     ).stdout
     versions = set()
     for line in output.splitlines():
@@ -508,7 +536,7 @@ def providers_from_env(env: Mapping[str, str]) -> list[Provider]:
         (
             "OpenRouter",
             "https://openrouter.ai/api/v1/chat/completions",
-            "OPENROUTER_API_KEY",
+            "OPENROUTER_CI_KEY",
             env.get("OPENROUTER_MODEL") or "google/gemini-3.8-flash",
         ),
     )
@@ -517,31 +545,23 @@ def providers_from_env(env: Mapping[str, str]) -> list[Provider]:
     ]
 
 
-TRANSIENT_STATUSES = (408, 429, 500, 502, 503, 504)
 Post = Callable[[str, dict, dict], Any]
 
 
-def http_post_json(url: str, payload: dict, headers: dict, attempts: int = 3) -> Any:
+def http_post_json(url: str, payload: dict, headers: dict) -> Any:
     request = urllib.request.Request(
         url,
         data=json.dumps(payload).encode("utf-8"),
         headers={"Content-Type": "application/json", "User-Agent": USER_AGENT, **headers},
         method="POST",
     )
-    for attempt in range(1, attempts + 1):
-        try:
-            with urllib.request.urlopen(request, timeout=180) as response:
-                return json.loads(response.read())
-        except urllib.error.HTTPError as error:
-            detail = " ".join(error.read().decode("utf-8", "replace")[:300].split())
-            failure = LLMError(f"HTTP {error.code}: {detail}", error.code)
-            if error.code not in TRANSIENT_STATUSES:
-                break
-        except (OSError, ValueError) as error:  # connection failures, timeouts, bad JSON
-            failure = LLMError(str(error))
-        if attempt < attempts:
-            time.sleep(5 * attempt)
-    raise failure
+    try:
+        return json.loads(read_url(request, timeout=180))
+    except urllib.error.HTTPError as error:
+        detail = " ".join(error.read().decode("utf-8", "replace")[:300].split())
+        raise LLMError(f"HTTP {error.code}: {detail}", error.code) from error
+    except (OSError, ValueError) as error:  # connection failures, timeouts, bad JSON
+        raise LLMError(str(error)) from error
 
 
 def ask(provider: Provider, system: str, user: str, post: Post) -> dict:

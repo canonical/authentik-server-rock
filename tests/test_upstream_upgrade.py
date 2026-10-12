@@ -358,11 +358,11 @@ class LLMTest(unittest.TestCase):
     def test_providers_come_from_the_environment(self):
         self.assertEqual(uu.providers_from_env({}), [])
         providers = uu.providers_from_env(
-            {"OPENROUTER_API_KEY": "o", "GEMINI_API_KEY": "g", "GEMINI_MODEL": ""}
+            {"OPENROUTER_CI_KEY": "o", "GEMINI_API_KEY": "g", "GEMINI_MODEL": ""}
         )
         self.assertEqual([p.name for p in providers], ["Gemini", "OpenRouter"])
         self.assertEqual(providers[0].model, "gemini-3.8-flash")
-        custom = uu.providers_from_env({"OPENROUTER_API_KEY": "o", "OPENROUTER_MODEL": "x/y"})
+        custom = uu.providers_from_env({"OPENROUTER_CI_KEY": "o", "OPENROUTER_MODEL": "x/y"})
         self.assertEqual([(p.name, p.model) for p in custom], [("OpenRouter", "x/y")])
 
     def test_upstream_text_cannot_close_its_wrapper(self):
@@ -381,6 +381,79 @@ class LLMTest(unittest.TestCase):
         for charm in uu.CHARMS:
             self.assertIn(charm.repo, prompt)
         self.assertNotIn("{{", prompt)
+
+
+class NetworkTest(unittest.TestCase):
+    def setUp(self):
+        self.calls = 0
+        sleep = patch.object(uu.time, "sleep", lambda seconds: None)
+        sleep.start()
+        self.addCleanup(sleep.stop)
+
+    def serve(self, *outcomes):
+        """Make urlopen return or raise each outcome in turn."""
+        remaining = iter(outcomes)
+
+        def urlopen(request, timeout):
+            self.calls += 1
+            outcome = next(remaining)
+            if isinstance(outcome, Exception):
+                raise outcome
+            return contextlib.closing(io.BytesIO(outcome))
+
+        opener = patch.object(uu.urllib.request, "urlopen", urlopen)
+        opener.start()
+        self.addCleanup(opener.stop)
+
+    @staticmethod
+    def http_error(code):
+        return uu.urllib.error.HTTPError("https://x", code, "x", {}, io.BytesIO(b"went\nwrong"))
+
+    def test_get_retries_temporary_failures(self):
+        self.serve(self.http_error(503), TimeoutError("timed out"), b"content")
+        self.assertEqual(uu.http_get("https://x"), "content")
+        self.assertEqual(self.calls, 3)
+
+    def test_get_gives_up_after_three_attempts(self):
+        self.serve(*[self.http_error(502)] * 3)
+        with self.assertRaises(uu.urllib.error.HTTPError):
+            uu.http_get("https://x")
+        self.assertEqual(self.calls, 3)
+
+    def test_a_missing_file_is_not_retried(self):
+        self.serve(self.http_error(404))
+        self.assertIsNone(uu.http_get("https://x"))
+        self.assertEqual(self.calls, 1)
+
+    def test_post_reports_failures_as_llm_errors(self):
+        self.serve(self.http_error(400))
+        with self.assertRaises(LLMError) as raised:
+            uu.http_post_json("https://x", {}, {})
+        self.assertEqual((raised.exception.status, self.calls), (400, 1))
+        self.assertEqual(str(raised.exception), "HTTP 400: went wrong")
+
+        self.calls = 0
+        self.serve(self.http_error(429), b'{"ok": true}')
+        self.assertEqual(uu.http_post_json("https://x", {}, {}), {"ok": True})
+        self.assertEqual(self.calls, 2)
+
+        self.serve(b"<html>")
+        with self.assertRaises(LLMError):
+            uu.http_post_json("https://x", {}, {})
+
+    def test_listing_releases_retries_git(self):
+        attempts = []
+
+        def run(command, **kwargs):
+            attempts.append(command)
+            if len(attempts) == 1:
+                raise uu.subprocess.CalledProcessError(128, command)
+            tags = "abc\trefs/tags/version/2026.8.3\ndef\trefs/tags/version/2026.8.0-rc1\n"
+            return uu.subprocess.CompletedProcess(command, 0, stdout=tags)
+
+        with patch.object(uu.subprocess, "run", run):
+            self.assertEqual(uu.list_released_versions(), [V("2026.8.3")])
+        self.assertEqual(len(attempts), 2)
 
 
 class PolicyTest(unittest.TestCase):

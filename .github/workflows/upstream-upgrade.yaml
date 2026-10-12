@@ -49,7 +49,7 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENROUTER_CI_KEY: ${{ secrets.OPENROUTER_CI_KEY }}
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
           OPENROUTER_MODEL: ${{ vars.OPENROUTER_MODEL }}
         run: |

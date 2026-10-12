@@ -53,8 +53,8 @@ Moving the rock to a new authentik release is driven by three pieces:
    run. A series bump always opens issues; a patch bump only does when its
    risk is not low.
 
-The LLM needs a `GEMINI_API_KEY` or `OPENROUTER_API_KEY` repository secret, and
-its model can be changed with the `GEMINI_MODEL` or `OPENROUTER_MODEL`
+The LLM needs the `OPENROUTER_CI_KEY` or a `GEMINI_API_KEY` repository secret,
+and its model can be changed with the `OPENROUTER_MODEL` or `GEMINI_MODEL`
 repository variables. Without a key the pull request comment still shows the
 build comparison, and no charm issues are opened.
 
