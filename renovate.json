@@ -14,7 +14,31 @@
   ],
   "automergeType": "pr",
   "rebaseWhen": "behind-base-branch",
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "The upstream authentik release that rockcraft.yaml builds",
+      "managerFilePatterns": ["/^rockcraft\\.yaml$/"],
+      "matchStrings": [
+        "\\nversion: \"(?<currentValue>[^\"\\s]+)\"",
+        "source-tag: version/(?<currentValue>\\S+)",
+        "main\\.Version=(?<currentValue>[0-9.]+)"
+      ],
+      "depNameTemplate": "goauthentik/authentik",
+      "datasourceTemplate": "github-releases",
+      "extractVersionTemplate": "^version/(?<version>.+)$"
+    }
+  ],
   "packageRules": [
+    {
+      "description": "authentik upgrades are merged by a person. Patches and each release series get their own PR, because upstream only supports moving one series at a time. The upstream- branch prefix keeps these PRs out of the auto-approver workflow.",
+      "matchDepNames": ["goauthentik/authentik"],
+      "automerge": false,
+      "separateMinorPatch": true,
+      "separateMultipleMinor": true,
+      "additionalBranchPrefix": "upstream-",
+      "commitMessageTopic": "authentik"
+    },
     {
       "groupName": "github actions",
       "matchManagers": ["github-actions"],

@@ -5,6 +5,8 @@ on:
   push:
     branches:
       - "renovate/**"
+      # Upstream authentik upgrades (see renovate.json) wait for a person.
+      - "!renovate/upstream-**"
 
 jobs:
   autoapprove:
