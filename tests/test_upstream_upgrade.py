@@ -513,14 +513,6 @@ class PolicyTest(unittest.TestCase):
         self.assertIn("2026.8", floored["risk"]["drivers"][0]["title"])
         self.assertEqual(uu.apply_path_floor(sample_analysis(), SERIES_BUMP), sample_analysis())
 
-    def test_charm_issues_for_series_bumps_and_risky_patches_only(self):
-        patch_bump = uu.plan_upgrade(V("2026.5.3"), V("2026.5.7"), RELEASED)
-        low, medium = sample_analysis(), sample_analysis()
-        low["risk"]["level"] = "low"
-        self.assertTrue(uu.opens_charm_issues(SERIES_BUMP, low))
-        self.assertFalse(uu.opens_charm_issues(patch_bump, low))
-        self.assertTrue(uu.opens_charm_issues(patch_bump, medium))
-
 
 class RenderTest(unittest.TestCase):
     def setUp(self):
@@ -537,8 +529,8 @@ class RenderTest(unittest.TestCase):
         self.assertIn("+RUN pnpm install", comment)
         self.assertIn("The current series has a newer patch, 2026.5.7.", comment)
         self.assertIn("### Changes needed in `rockcraft.yaml` (AI)", comment)
-        self.assertIn("Upgrade issues are opened on", comment)
-        self.assertIn("Validation planned for authentik-worker (1)", comment)
+        self.assertIn("run the `Upstream charm upgrade issues` workflow", comment)
+        self.assertIn("Validation needed on authentik-worker (1)", comment)
         self.assertIn("written by Gemini gemini-test", comment)
         self.assertNotIn("{{", comment)
 
@@ -555,7 +547,7 @@ class RenderTest(unittest.TestCase):
         image = "ghcr.io/canonical/authentik-server:2026.8.3"
         server, worker = (
             uu.render_charm_issue(
-                charm, SERIES_BUMP, sample_analysis(), "Gemini gemini-test", image, "https://pr"
+                charm, SERIES_BUMP, sample_analysis(), "Gemini gemini-test", image
             )
             for charm in uu.CHARMS
         )
@@ -574,14 +566,13 @@ class RenderTest(unittest.TestCase):
         analysis = sample_analysis()
         analysis["charm"]["validation"] = []
         analysis["charm"]["changes"] = []
-        issue = uu.render_charm_issue(uu.CHARMS[0], SERIES_BUMP, analysis, "m", "img", "")
+        issue = uu.render_charm_issue(uu.CHARMS[0], SERIES_BUMP, analysis, "m", "img")
         self.assertIn("found nothing specific to this charm", issue)
-        self.assertIn("- **Rock change**: not recorded", issue)
 
     def test_placeholders_in_values_are_not_expanded_and_missing_ones_fail(self):
         analysis = sample_analysis()
         analysis["charm"]["summary"] = "see {{ IMAGE }}"
-        issue = uu.render_charm_issue(uu.CHARMS[0], SERIES_BUMP, analysis, "m", "the-image", "")
+        issue = uu.render_charm_issue(uu.CHARMS[0], SERIES_BUMP, analysis, "m", "the-image")
         self.assertIn("see {{ IMAGE }}", issue)
         with self.assertRaises(KeyError):
             uu.render("pr_comment.md.tmpl", {"FROM": "1"})
@@ -626,7 +617,6 @@ class MainTest(unittest.TestCase):
         self.assertEqual(outputs["changed"], "true")
         self.assertEqual(outputs["kind"], "series")
         self.assertEqual(outputs["risk"], "")
-        self.assertEqual(outputs["open_charm_issues"], "false")
 
     def test_require_llm_fails_instead_of_filing_nothing(self):
         self.assertEqual(self.run_main("--from", "2026.5.3", "--require-llm"), 1)
@@ -657,13 +647,10 @@ class MainTest(unittest.TestCase):
             self.assertIn("ghcr.io/canonical/authentik-server:2026.8.3", body)
         outputs = self.read_outputs()
         self.assertEqual(outputs["risk"], "medium")
-        self.assertEqual(outputs["open_charm_issues"], "true")
 
     def test_no_version_change_is_a_no_op(self):
         self.assertEqual(self.run_main("--from", "2026.8.3"), 0)
-        self.assertEqual(
-            self.read_outputs(), {"changed": "false", "open_charm_issues": "false"}
-        )
+        self.assertEqual(self.read_outputs(), {"changed": "false"})
         self.assertFalse(self.out.exists())
 
     def test_unknown_versions_are_rejected(self):

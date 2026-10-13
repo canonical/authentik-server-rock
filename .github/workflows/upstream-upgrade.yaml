@@ -3,8 +3,8 @@ run-name: Upstream upgrade analysis for PR ${{ github.event.pull_request.number 
 
 # When a pull request changes the upstream version in rockcraft.yaml (Renovate
 # opens these), comment with what changed in upstream's build and how risky the
-# upgrade is. The same script files the charm issues after the image is
-# published, see upstream-charm-issues.yaml.
+# upgrade is. The same script writes the charm upgrade issues, which are opened
+# by hand, see upstream-charm-issues.yaml.
 
 on:
   pull_request:

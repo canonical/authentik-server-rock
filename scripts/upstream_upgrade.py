@@ -42,6 +42,9 @@ TAG_PREFIX = "version/"
 RELEASE_NOTES_PATH = "website/docs/releases/{year}/v{year}.{minor}.mdx"
 ROCK_IMAGE = "ghcr.io/canonical/authentik-server"
 
+# The workflow an engineer runs to open the charm issues, as its name: reads.
+CHARM_ISSUES_WORKFLOW = "Upstream charm upgrade issues"
+
 TEMPLATES = Path(__file__).resolve().parent.parent / "templates"
 USER_AGENT = "authentik-server-rock-upstream-upgrade"
 
@@ -78,7 +81,7 @@ def series_name(series: Series) -> str:
 
 @dataclass(frozen=True)
 class Charm:
-    """A charm that deploys this rock and gets an issue when the rock moves."""
+    """A charm that deploys this rock and can be sent an upgrade issue."""
 
     key: str  # how the analysis refers to it in `applies_to`
     repo: str
@@ -758,11 +761,6 @@ def apply_path_floor(analysis: dict, path: UpgradePath) -> dict:
     return {**analysis, "risk": {**risk, "level": "high", "drivers": [driver, *risk["drivers"]]}}
 
 
-def opens_charm_issues(path: UpgradePath, analysis: dict) -> bool:
-    """A series bump always needs charm work; a patch bump only when it is risky."""
-    return path.kind == "series" or analysis["risk"]["level"] != "low"
-
-
 def upstream_links(path: UpgradePath) -> str:
     base = f"https://github.com/{UPSTREAM_REPO}"
     links = [f"[release {path.to}]({base}/releases/tag/{TAG_PREFIX}{path.to})"]
@@ -842,20 +840,18 @@ def render_pr_comment(
             rock_block += "\n\n" + _bullets(rock["changes"])
 
         repos = " and ".join(f"[{c.repo}](https://github.com/{c.repo})" for c in CHARMS)
-        if opens_charm_issues(path, analysis):
-            follow_up = (
-                f"Upgrade issues are opened on {repos} once this is merged and the "
-                "image is published."
-            )
-        else:
-            follow_up = "No charm issues are opened for a low-risk patch bump."
+        follow_up = (
+            "Nothing is filed on the charms automatically. When they are ready to move, "
+            f"run the `{CHARM_ISSUES_WORKFLOW}` workflow to open an upgrade issue on "
+            f"{repos} for the versions involved."
+        )
         charm_block = f"### Charm impact (AI)\n\n{analysis['charm']['summary']}\n\n{follow_up}"
         for charm in CHARMS:
             checks = _for_charm(analysis["charm"]["validation"], charm)
             if checks:
                 titles = "\n".join(f"- {check['title']}" for check in checks)
                 charm_block += (
-                    f"\n\n<details><summary>Validation planned for {charm.app} "
+                    f"\n\n<details><summary>Validation needed on {charm.app} "
                     f"({len(checks)})</summary>\n\n{titles}\n\n</details>"
                 )
         footer += (
@@ -883,7 +879,7 @@ def charm_issue_title(path: UpgradePath) -> str:
 
 
 def render_charm_issue(
-    charm: Charm, path: UpgradePath, analysis: dict, model: str, image: str, rock_change: str
+    charm: Charm, path: UpgradePath, analysis: dict, model: str, image: str
 ) -> str:
     risk = analysis["risk"]
     changes = _for_charm(analysis["charm"]["changes"], charm)
@@ -906,7 +902,7 @@ def render_charm_issue(
             "SERVICE": charm.service,
             "IMAGE": image,
             "MODEL": model,
-            "ROCK_CHANGE": rock_change or "not recorded",
+            "WORKFLOW": CHARM_ISSUES_WORKFLOW,
             "SOURCES": upstream_links(path),
             "RISK_LEVEL": risk["level"],
             "RISK_SUMMARY": risk["summary"],
@@ -949,7 +945,6 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="the rock's recipe, shown to the LLM (default: rockcraft.yaml)",
     )
     parser.add_argument("--image", help=f"published image (default: {ROCK_IMAGE}:<to>)")
-    parser.add_argument("--rock-change", default="", help="URL of the change that bumped the rock")
     parser.add_argument("--out-dir", type=Path, default=Path(".artifacts"))
     parser.add_argument(
         "--require-llm", action="store_true", help="fail when the LLM analysis is unavailable"
@@ -963,7 +958,7 @@ def main(argv: list[str] | None = None) -> int:
     to = Version.parse(args.to) if args.to else rockcraft_version(args.rockcraft)
     if to <= frm:
         print(f"Nothing to assess: {frm} -> {to} is not an upgrade.")
-        write_outputs({"changed": "false", "open_charm_issues": "false"})
+        write_outputs({"changed": "false"})
         return 0
 
     released = list_released_versions()
@@ -1015,8 +1010,7 @@ def main(argv: list[str] | None = None) -> int:
         for charm in CHARMS:
             body_file = args.out_dir / f"charm_issue_{charm.key}.md"
             body_file.write_text(
-                render_charm_issue(charm, path, analysis, model, image, args.rock_change),
-                encoding="utf-8",
+                render_charm_issue(charm, path, analysis, model, image), encoding="utf-8"
             )
             issues.append(
                 {"repo": charm.repo, "title": charm_issue_title(path), "body_file": str(body_file)}
@@ -1032,7 +1026,6 @@ def main(argv: list[str] | None = None) -> int:
             "to": str(to),
             "kind": path.kind,
             "risk": analysis["risk"]["level"] if analysis else "",
-            "open_charm_issues": str(bool(analysis) and opens_charm_issues(path, analysis)).lower(),
         }
     )
     return 0
