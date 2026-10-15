@@ -11,12 +11,17 @@ on:
       - "v**"
     paths:
       - "rockcraft.yaml"
+      - "Makefile"
+      - ".trivyignore"
       - ".github/workflows/**.yaml"
   pull_request:
     branches:
       - "*"
 
 jobs:
+  unit-test:
+    uses: ./.github/workflows/unittest.yaml
+
   get-architectures:
     runs-on: ubuntu-latest
     outputs:
@@ -33,7 +38,9 @@ jobs:
           echo "architectures=$archs" >> "$GITHUB_OUTPUT"
 
   build:
-    needs: get-architectures
+    needs:
+      - unit-test
+      - get-architectures
     strategy:
       matrix:
         architecture: ${{ fromJson(needs.get-architectures.outputs.architectures) }}
@@ -53,12 +60,15 @@ jobs:
   oci-publish:
     # only release to oci-factory in case of release
     if: ${{ (github.ref == 'refs/heads/main') || startsWith(github.ref, 'refs/heads/release-') }}
-    needs: build
+    needs:
+      - build
+      - scan
     uses: canonical/identity-team/.github/workflows/_rock-oci-publish.yaml@fc85af7448538c473be450dc2c8ec5d158ea0d15 # v1.17.0
     with:
       edge-release: false
       eol-stable-release: "3 month"
       ubuntu-base-version: "26.04"
+      ignore-vulnerabilities: "CVE-2024-42490,CVE-2024-23647"
     secrets:
       PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
 
@@ -73,6 +83,10 @@ jobs:
     uses: canonical/identity-team/.github/workflows/_rock-scan.yaml@fc85af7448538c473be450dc2c8ec5d158ea0d15 # v1.17.0
     with:
       image: ${{ needs.gh-publish.outputs.image }}
+      exit-code: '1'
+      severity: 'HIGH,CRITICAL'
+      ignore-unfixed: true
+      trivyignores: '.trivyignore'
 
   oci-update-pr-server:
     permissions:

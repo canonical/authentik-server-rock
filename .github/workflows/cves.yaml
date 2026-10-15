@@ -57,5 +57,4 @@ jobs:
             exit-code: '0'
             severity: 'HIGH,CRITICAL'
             ignore-unfixed: true
-
-
+            trivyignores: '.trivyignore'
