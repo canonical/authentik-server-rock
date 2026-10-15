@@ -10,10 +10,7 @@ fileExistenceTests:
     shouldExist: false
 
   # ── Application binaries ────────────────────────────────────────────────────
-  - name: "go server binary"
-    path: "/usr/bin/authentik-server"
-    shouldExist: true
-  - name: "rust worker binary"
+  - name: "authentik binary"
     path: "/usr/bin/authentik"
     shouldExist: true
   - name: "python3.14 interpreter"
@@ -113,8 +110,8 @@ commandTests:
     command: "/ak-root/.venv/bin/python"
     args: ["-c", "import cryptography, lxml, xmlsec, django, psycopg; print('OK')"]
     expectedOutput: ["OK"]
-  - name: "go server binary executes"
-    command: "/usr/bin/authentik-server"
+  - name: "authentik binary executes"
+    command: "/usr/bin/authentik"
     args: ["--help"]
     exitCode: 0
   - name: "coreutils mkdir present"
