@@ -36,6 +36,34 @@ docker run -d \
   authentik-server:latest
 ```
 
+## Security Checks
+
+Run the local vulnerability checks before you open a pull request.
+
+Check the Go server dependencies for known vulnerabilities with `govulncheck`:
+
+```shell
+make govulncheck
+```
+
+After you pack the rock with `rockcraft pack`, scan the rock archive with
+[Trivy](https://trivy.dev/):
+
+```shell
+make scan-rock
+```
+
+To scan a specific rock file, set `ROCK_FILE`:
+
+```shell
+make scan-rock ROCK_FILE=authentik-server_2026.5.3_amd64.rock
+```
+
+In CI, the `unit-test` job runs `make govulncheck` and `make test` before the
+rock build starts. After the build, the `scan` job scans the image with Trivy
+and blocks publication if `HIGH` or `CRITICAL` vulnerabilities with available
+fixes exist.
+
 ## Upstream Upgrades
 
 Moving the rock to a new authentik release is driven by three pieces:
