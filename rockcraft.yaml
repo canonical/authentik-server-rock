@@ -5,7 +5,7 @@ version: "2026.8.4"
 summary: authentik identity provider server
 description: |
   authentik is an open-source Identity Provider focused on flexibility and
-  versatility. This rock bundles the authentik server (Go), worker (Rust/Python)
+  versatility. This rock bundles the authentik server and worker (Rust/Python)
   and all required runtimes.
 license: MIT
 
@@ -104,7 +104,7 @@ parts:
 
   # ── Web UI (Node.js frontend) ─────────────────────────────────────────────────
   # Builds web/dist/ (main UI) and web/authentik/ (brand assets).
-  # Both build commands run from web/ subdir; wireit orchestrates the vite build.
+  # Both build commands run from web/ subdir using pnpm.
   # node/24/stable is sufficient: package.json specifies "node": ">=24".
   web-ui:
     plugin: nil
@@ -115,11 +115,14 @@ parts:
     build-snaps:
       - node/24/stable
     override-build: |
-      cd "${CRAFT_PART_SRC}/web"
-      npm ci
+      npm install --global --prefix "${CRAFT_PART_BUILD}/.npm-global" pnpm@11.20.0
+      export PATH="${CRAFT_PART_BUILD}/.npm-global/bin:${PATH}"
 
-      npm run build
-      npm run build:sfe
+      cd "${CRAFT_PART_SRC}/web"
+      pnpm install --frozen-lockfile
+
+      NODE_ENV=production pnpm run build
+      NODE_ENV=production pnpm run build:sfe
 
       mkdir -p "${CRAFT_PART_INSTALL}/web"
       cp -r "${CRAFT_PART_SRC}/web/dist/"      "${CRAFT_PART_INSTALL}/web/dist/"
@@ -127,37 +130,6 @@ parts:
     stage:
       - web/dist/
       - web/authentik/
-
-  # ── Go binary: authentik-server ──────────────────────────────────────────────
-  # HTTP server / reverse proxy frontend. CGO is required for GOFIPS140 support.
-  # robots.txt and security.txt are embedded via //go:embed and exist in the
-  # source repo, so this part does not depend on web-ui.
-  go-server:
-    plugin: go
-    source: https://github.com/goauthentik/authentik
-    source-type: git
-    source-tag: version/2026.8.4
-    source-depth: 1
-    build-snaps:
-      - go/1.26/stable
-    build-packages:
-      - gcc
-    build-environment:
-      - CGO_ENABLED: "1"
-      - GOFIPS140: "latest"
-    override-build: |
-      go mod download
-      go get -u golang.org/x/net
-      go get -u golang.org/x/text
-      go get -u golang.org/x/crypto
-      go get -u golang.org/x/sys
-      go get -u github.com/klauspost/compress
-      go get -u go.opentelemetry.io/otel
-      go mod tidy
-      mkdir -p "${CRAFT_PART_INSTALL}/usr/bin"
-      GOARCH="${CRAFT_ARCH_BUILD_FOR}" go build -ldflags="-s -w -X 'main.Version=2026.8.4'" -o "${CRAFT_PART_INSTALL}/usr/bin/authentik-server" ./cmd/server
-    stage:
-      - usr/bin/authentik-server
 
   # ── Python virtual environment ────────────────────────────────────────────────
   # Builds the Python venv at /ak-root/.venv using uv. Packages that require a
@@ -192,7 +164,7 @@ parts:
       export RUSTUP_HOME="${CRAFT_PART_BUILD}/.rustup"
       export CARGO_HOME="${CRAFT_PART_BUILD}/.cargo"
       curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
-        sh -s -- -y --default-toolchain 1.95.0 --no-modify-path \
+        sh -s -- -y --default-toolchain 1.97.1 --no-modify-path \
            --profile minimal 2>&1
       export PATH="${CARGO_HOME}/bin:${PATH}"
 
@@ -215,25 +187,23 @@ parts:
           --python /usr/bin/python3.14 \
           --python-preference only-system
 
-      # Upgrade vulnerable Python dependencies (CVE-2026-32597, CVE-2026-48526, GHSA-537c-gmf6-5ccf, GHSA-6v7p-g79w-8964, CVE-2026-44431, CVE-2026-44432, CVE-2026-69244, CVE-2026-69247, CVE-2026-59939, CVE-2026-59884, CVE-2026-59885, CVE-2026-59886, CVE-2026-54284, CVE-2026-59893, CVE-2026-71491, CVE-2026-53877, CVE-2026-53878, CVE-2026-48588, CVE-2026-73228, CVE-2026-73229, CVE-2026-71554, CVE-2026-45409, CVE-2026-59890, CVE-2026-63374)
+      # Upgrade vulnerable Python dependencies in uv.lock (CVE-2026-97687, CVE-2026-97689, CVE-2026-59893, CVE-2026-63374)
       VIRTUAL_ENV=/ak-root/.venv \
-      UV_NO_BINARY_PACKAGE="cryptography" \
-      CARGO_HOME="${CARGO_HOME}" \
         uv pip install --upgrade \
           "aiohttp>=3.14.3" \
           "anyio>=4.14.2" \
-          "cryptography>=50.0.0" \
-          "django>=5.2.16,<6.0" \
+          "django>=5.2.17,<6.0" \
           "djangorestframework>=3.17.2" \
           "h2>=4.4.1" \
           "httplib2>=0.32.0" \
-          "idna>=3.15" \
+          "idna>=3.18" \
           "msgpack>=1.2.1" \
+          "multidict>=6.9.1" \
           "pyasn1>=0.6.4" \
-          "PyJWT>=2.13.0" \
+          "PyJWT>=2.15.1" \
           "setuptools>=83.0.0" \
           "sqlparse>=0.6.0" \
-          "urllib3>=2.7.0"
+          "urllib3>=2.8.0"
 
       # Strip debug symbols from compiled extensions. Source-built Rust
       # extensions (cryptography._rust.abi3.so in particular) are ~300 MB
@@ -245,12 +215,15 @@ parts:
     stage:
       - ak-root/.venv/
 
-  # ── Rust worker binary ────────────────────────────────────────────────────────
-  # Builds the `authentik` Rust binary (the celery/worker process).
+  # ── Rust binary: authentik ────────────────────────────────────────────────────
+  # Builds the `authentik` Rust binary (unified server and worker runtime).
   # aws-lc-rs FIPS requires cmake + clang + a Go toolchain.
   # PyO3 (pyo3 = "0.28.3") embeds Python 3.14; PYO3_PYTHON must point at it.
+  # Embeds web/dist/standalone/loading/startup.html built by web-ui.
   rust-binary:
     plugin: nil
+    after:
+      - web-ui
     source: https://github.com/goauthentik/authentik
     source-type: git
     source-tag: version/2026.8.4
@@ -268,13 +241,17 @@ parts:
       - AWS_LC_FIPS_SYS_CC: "clang"
       - PYO3_PYTHON: "/usr/bin/python3.14"
     override-build: |
-      # Install Rust 1.95.0 (pinned in rust-toolchain.toml)
+      # Install Rust 1.97.1 (pinned in rust-toolchain.toml)
       export RUSTUP_HOME="${CRAFT_PART_BUILD}/.rustup"
       export CARGO_HOME="${CRAFT_PART_BUILD}/.cargo"
       curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
-        sh -s -- -y --default-toolchain 1.95.0 --no-modify-path \
+        sh -s -- -y --default-toolchain 1.97.1 --no-modify-path \
            --profile minimal 2>&1
       export PATH="${CARGO_HOME}/bin:${PATH}"
+
+      mkdir -p "${CRAFT_PART_SRC}/web/dist/standalone/loading"
+      cp "${CRAFT_STAGE}/web/dist/standalone/loading/startup.html" \
+         "${CRAFT_PART_SRC}/web/dist/standalone/loading/startup.html"
 
       cd "${CRAFT_PART_SRC}"
       cargo build \
@@ -296,7 +273,6 @@ parts:
     plugin: dump
     after:
       - python-deps
-      - go-server
       - rust-binary
     source: https://github.com/goauthentik/authentik
     source-type: git
