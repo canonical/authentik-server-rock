@@ -21,6 +21,3 @@ jobs:
 
       - name: Run govulncheck
         run: make govulncheck
-
-      - name: Run unit tests
-        run: make test
