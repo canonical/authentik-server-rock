@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-"""Assess an upstream authentik upgrade for this rock and the charms that run it.
+"""Assess an upstream workload upgrade for a rock and the charms that deploy it.
 
 Given the version the rock builds today and the version it is moving to, this:
 
 1. works out the upgrade path from upstream's tags (patch or series bump, skipped
    series),
-2. compares the upstream files the rock's build depends on between the two tags,
+2. compares the upstream files the rock's build depends on between the two tags
+   (including manual CVE/dependency overrides in rockcraft.yaml),
 3. collects the release notes of every release the upgrade absorbs,
 4. asks an LLM to judge the risk and to plan what the charms must validate, and
 5. renders a pull request comment and one issue body per charm.
 
 Steps 1-3 are deterministic and always run. Step 4 is skipped when no API key is
-configured, unless --require-llm is given. Only the standard library is used, so the
-workflows need no install step.
+configured, unless --require-llm is given.
 """
 
 from __future__ import annotations
@@ -29,54 +29,82 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, TypeVar
 
-# What this rock tracks. These are the parts to turn into inputs when the tooling
-# moves to a shared workflow.
+try:
+    import yaml  # type: ignore[import-untyped]
+except ImportError:  # pragma: no cover
+    yaml = None  # type: ignore[assignment]
 
+# Default settings (used when no config file or rockcraft.yaml overrides them).
+WORKLOAD = "authentik"
 UPSTREAM_REPO = "goauthentik/authentik"
 TAG_PREFIX = "version/"
-RELEASE_NOTES_PATH = "website/docs/releases/{year}/v{year}.{minor}.mdx"
+SOURCE_SUBDIR = ""
+RELEASE_NOTES_PATH: str | None = "website/docs/releases/{year}/v{year}.{minor}.mdx"
 ROCK_IMAGE = "ghcr.io/canonical/authentik-server"
+DEFAULT_CHARM_BRANCH = "main"
+DEFAULT_CONFIG_PATH = Path(".github/upstream-upgrade.yaml")
+ENFORCE_SEQUENTIAL_SERIES = True
 
 # The workflow an engineer runs to open the charm issues, as its name: reads.
 CHARM_ISSUES_WORKFLOW = "Upstream charm upgrade issues"
 
-TEMPLATES = Path(__file__).resolve().parent.parent / "templates"
-USER_AGENT = "authentik-server-rock-upstream-upgrade"
+TEMPLATES = Path(__file__).resolve().parent / "templates"
+if not TEMPLATES.is_dir():
+    TEMPLATES = Path(__file__).resolve().parent.parent / "templates"
+USER_AGENT = "canonical-rock-upstream-upgrade"
 
 Series = tuple[int, int]
-VERSION_RE = re.compile(r"(\d{4})\.(\d{1,2})\.(\d+)")
+VERSION_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)")
 
 
 @dataclass(frozen=True, order=True)
 class Version:
-    """An upstream release such as 2026.8.3; 2026.8 is its release series."""
+    """An upstream release such as 2026.8.3 or 2.4.0; (major, minor) is its series."""
 
-    year: int
+    major: int
     minor: int
     patch: int
+
+    @property
+    def year(self) -> int:
+        return self.major
 
     @classmethod
     def parse(cls, text: str) -> Version:
         match = VERSION_RE.fullmatch(text.strip())
         if not match:
-            raise ValueError(f"not an authentik release version: {text!r}")
+            raise ValueError(f"not a release version (expected X.Y.Z): {text!r}")
         return cls(*map(int, match.groups()))
 
     @property
     def series(self) -> Series:
-        return (self.year, self.minor)
+        return (self.major, self.minor)
 
     def __str__(self) -> str:
-        return f"{self.year}.{self.minor}.{self.patch}"
+        return f"{self.major}.{self.minor}.{self.patch}"
 
 
 def series_name(series: Series) -> str:
     return f"{series[0]}.{series[1]}"
+
+
+DEFAULT_IN_PLACE_UPGRADE = (
+    "deploy the current `main` charm with `{{ FROM }}`, run a smoke flow, then "
+    "`juju refresh {{ APP }} --resource {{ RESOURCE }}={{ IMAGE }}` "
+    "and confirm existing data and relations survive."
+)
+
+AUTHENTIK_IN_PLACE_UPGRADE = (
+    "deploy the current `main` charm with `{{ FROM }}` against PostgreSQL (and "
+    "`authentik-worker`), create a test user/flow or OAuth client, then "
+    "`juju refresh {{ APP }} --resource {{ RESOURCE }}={{ IMAGE }}` "
+    "and confirm migrations succeed and existing data survives."
+)
 
 
 @dataclass(frozen=True)
@@ -85,20 +113,23 @@ class Charm:
 
     key: str  # how the analysis refers to it in `applies_to`
     repo: str
-    app: str
-    container: str
-    service: str
-    description: str  # what the LLM is told about it
-    files: tuple[str, ...]  # where it decides how authentik is configured and run
+    app: str = ""
+    container: str = ""
+    service: str = ""
+    resource: str = "oci-image"
+    description: str = ""  # what the LLM is told about it
+    files: tuple[str, ...] = ("charmcraft.yaml",)  # where it decides how workload is configured
+    in_place_upgrade: str = DEFAULT_IN_PLACE_UPGRADE
 
 
-CHARMS = (
+CHARMS: tuple[Charm, ...] = (
     Charm(
         key="server",
         repo="canonical/authentik-server-operator",
         app="authentik-server",
         container="authentik",
         service="authentik-server",
+        resource="oci-image",
         description=(
             "Kubernetes charm running `/lifecycle/ak server` (HTTP 9000, HTTPS 9443, "
             "metrics 9300). It configures authentik only through AUTHENTIK_* environment "
@@ -119,6 +150,7 @@ CHARMS = (
             "src/cli.py",
             "src/authentik_api.py",
         ),
+        in_place_upgrade=AUTHENTIK_IN_PLACE_UPGRADE,
     ),
     Charm(
         key="worker",
@@ -126,6 +158,7 @@ CHARMS = (
         app="authentik-worker",
         container="authentik",
         service="authentik-worker",
+        resource="oci-image",
         description=(
             "Kubernetes charm running `/lifecycle/ak worker` (metrics 9300) from the same "
             "image. It receives AUTHENTIK_SECRET_KEY and the PostgreSQL settings from the "
@@ -140,8 +173,221 @@ CHARMS = (
             "src/integrations.py",
             "src/services.py",
         ),
+        in_place_upgrade=AUTHENTIK_IN_PLACE_UPGRADE,
     ),
 )
+
+
+# Configuration & Auto-detection
+
+
+def _load_yaml_text(text: str) -> dict[str, Any]:
+    """Parse YAML text using PyYAML, JSON, or yq as a fallback."""
+    if not text.strip():
+        return {}
+    if yaml is not None:
+        data = yaml.safe_load(text)
+        return data if isinstance(data, dict) else {}
+    try:
+        data = json.loads(text)
+        return data if isinstance(data, dict) else {}
+    except ValueError:
+        result = subprocess.run(
+            ["yq", "-o=json"],
+            input=text,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        data = json.loads(result.stdout)
+        return data if isinstance(data, dict) else {}
+
+
+@dataclass(frozen=True)
+class RockMetadata:
+    """Metadata inferred from a rock's rockcraft.yaml."""
+
+    name: str
+    version: Version | None
+    rock_image: str
+    workload: str
+    upstream_repo: str
+    tag_prefix: str
+    source_subdir: str
+    service: str
+
+
+def inspect_rockcraft(rockcraft_text: str) -> RockMetadata:
+    """Extract rock name, version, upstream GitHub repo, tag prefix, and service from rockcraft.yaml."""
+    data = _load_yaml_text(rockcraft_text)
+    name = str(data.get("name") or "")
+    raw_version = str(data.get("version") or "")
+    version: Version | None = None
+    if raw_version:
+        try:
+            version = Version.parse(raw_version)
+        except ValueError:
+            version = None
+
+    services = data.get("services")
+    service = next(iter(services.keys()), name) if isinstance(services, dict) and services else name
+
+    upstream_repo = ""
+    tag_prefix = ""
+    source_subdir = ""
+    parts = data.get("parts")
+    if isinstance(parts, dict):
+        for part in parts.values():
+            if not isinstance(part, dict):
+                continue
+            source = str(part.get("source") or "")
+            gh_match = re.match(
+                r"https?://github\.com/([^/\s]+/[^/\s]+?)(?:\.git)?/?$", source
+            )
+            if not gh_match:
+                continue
+            source_tag = str(part.get("source-tag") or "")
+            if raw_version and source_tag.endswith(raw_version):
+                upstream_repo = gh_match.group(1)
+                tag_prefix = source_tag[: -len(raw_version)]
+                source_subdir = str(part.get("source-subdir") or "").strip("/")
+                break
+            if not upstream_repo:
+                upstream_repo = gh_match.group(1)
+                if source_tag and VERSION_RE.search(source_tag):
+                    ver_m = VERSION_RE.search(source_tag)
+                    assert ver_m is not None
+                    tag_prefix = source_tag[: ver_m.start()]
+                source_subdir = str(part.get("source-subdir") or "").strip("/")
+
+    workload = upstream_repo.split("/")[-1] if upstream_repo else name
+    rock_image = f"ghcr.io/canonical/{name}" if name else ""
+    return RockMetadata(
+        name=name,
+        version=version,
+        rock_image=rock_image,
+        workload=workload,
+        upstream_repo=upstream_repo,
+        tag_prefix=tag_prefix,
+        source_subdir=source_subdir,
+        service=service,
+    )
+
+
+def enrich_charm_from_charmcraft(
+    charm: Charm, charmcraft_text: str, rock_image: str, default_service: str = ""
+) -> Charm:
+    """Fill in missing charm metadata (app, container, service, resource) from charmcraft.yaml."""
+    data = _load_yaml_text(charmcraft_text)
+    app = charm.app or str(data.get("name") or charm.repo.split("/")[-1])
+
+    container = charm.container
+    containers = data.get("containers")
+    if not container and isinstance(containers, dict) and containers:
+        container = str(next(iter(containers.keys())))
+
+    resource = charm.resource or "oci-image"
+    resources = data.get("resources")
+    if isinstance(resources, dict):
+        for res_name, res_data in resources.items():
+            if not isinstance(res_data, dict):
+                continue
+            up_src = str(res_data.get("upstream-source") or "")
+            if rock_image and up_src.startswith(f"{rock_image}:"):
+                resource = str(res_name)
+                break
+
+    service = charm.service or default_service or container or app
+    return replace(
+        charm,
+        app=app,
+        container=container or app,
+        service=service,
+        resource=resource,
+    )
+
+
+def configure_from_files(
+    config_path: Path | None, rockcraft_path: Path | None
+) -> None:
+    """Update module-level configuration from rockcraft.yaml and optional config YAML."""
+    global WORKLOAD, UPSTREAM_REPO, TAG_PREFIX, SOURCE_SUBDIR, RELEASE_NOTES_PATH
+    global ROCK_IMAGE, DIFFED_FILES, TRUSTED_LINK_HOSTS, CHARMS, ENFORCE_SEQUENTIAL_SERIES
+
+    rock_meta: RockMetadata | None = None
+    if rockcraft_path and rockcraft_path.exists():
+        rock_meta = inspect_rockcraft(rockcraft_path.read_text(encoding="utf-8"))
+
+    cfg: dict[str, Any] = {}
+    if config_path and config_path.exists():
+        cfg = _load_yaml_text(config_path.read_text(encoding="utf-8"))
+
+    if not cfg and (rock_meta is None or not rock_meta.upstream_repo):
+        return
+
+    if rock_meta and rock_meta.upstream_repo:
+        WORKLOAD = rock_meta.workload
+        UPSTREAM_REPO = rock_meta.upstream_repo
+        TAG_PREFIX = rock_meta.tag_prefix
+        SOURCE_SUBDIR = rock_meta.source_subdir
+        ROCK_IMAGE = rock_meta.rock_image
+        if UPSTREAM_REPO != "goauthentik/authentik":
+            RELEASE_NOTES_PATH = None
+            DIFFED_FILES = ("Dockerfile",)
+            TRUSTED_LINK_HOSTS = ()
+            ENFORCE_SEQUENTIAL_SERIES = False
+
+    if "workload" in cfg:
+        WORKLOAD = str(cfg["workload"])
+    if "upstream_repo" in cfg:
+        UPSTREAM_REPO = str(cfg["upstream_repo"])
+    if "tag_prefix" in cfg:
+        TAG_PREFIX = str(cfg["tag_prefix"])
+    if "source_subdir" in cfg:
+        SOURCE_SUBDIR = str(cfg["source_subdir"]).strip("/")
+    if "rock_image" in cfg:
+        ROCK_IMAGE = str(cfg["rock_image"])
+    if "release_notes_path" in cfg:
+        val = cfg["release_notes_path"]
+        RELEASE_NOTES_PATH = str(val) if val else None
+    if "diffed_files" in cfg and isinstance(cfg["diffed_files"], list):
+        DIFFED_FILES = tuple(str(f) for f in cfg["diffed_files"])
+    if "trusted_link_hosts" in cfg and isinstance(cfg["trusted_link_hosts"], list):
+        TRUSTED_LINK_HOSTS = tuple(str(h) for h in cfg["trusted_link_hosts"])
+    if "enforce_sequential_series" in cfg:
+        ENFORCE_SEQUENTIAL_SERIES = bool(cfg["enforce_sequential_series"])
+
+    default_service = rock_meta.service if rock_meta else ""
+    if "charms" in cfg and isinstance(cfg["charms"], list):
+        parsed_charms: list[Charm] = []
+        for entry in cfg["charms"]:
+            if not isinstance(entry, dict):
+                continue
+            repo = str(entry["repo"])
+            default_key = repo.split("/")[-1].removesuffix("-operator").removesuffix("-k8s")
+            key = str(entry.get("key") or default_key)
+            files_raw = entry.get("files") or ["charmcraft.yaml"]
+            in_place = str(
+                entry.get("in_place_upgrade")
+                or cfg.get("in_place_upgrade")
+                or DEFAULT_IN_PLACE_UPGRADE
+            )
+            parsed_charms.append(
+                Charm(
+                    key=key,
+                    repo=repo,
+                    app=str(entry.get("app") or ""),
+                    container=str(entry.get("container") or ""),
+                    service=str(entry.get("service") or default_service),
+                    resource=str(entry.get("resource") or "oci-image"),
+                    description=str(entry.get("description") or f"Charm in {repo}."),
+                    files=tuple(str(f) for f in files_raw),
+                    in_place_upgrade=in_place,
+                )
+            )
+        if parsed_charms:
+            CHARMS = tuple(parsed_charms)
+    upstream_file.cache_clear()
 
 
 # Network access
@@ -179,9 +425,10 @@ def read_url(request: urllib.request.Request, timeout: int) -> bytes:
     return retrying(read)
 
 
-def http_get(url: str) -> str | None:
+def http_get(url: str, headers: Mapping[str, str] | None = None) -> str | None:
     """Return the body at a URL, or None when it does not exist."""
-    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    req_headers = {"User-Agent": USER_AGENT, **(headers or {})}
+    request = urllib.request.Request(url, headers=req_headers)
     try:
         return read_url(request, timeout=30).decode("utf-8")
     except urllib.error.HTTPError as error:
@@ -193,40 +440,122 @@ def http_get(url: str) -> str | None:
 @lru_cache(maxsize=None)
 def upstream_file(version: Version, path: str) -> str | None:
     """A file from upstream's source tree as it was at a release."""
-    return http_get(
+    content = http_get(
         f"https://raw.githubusercontent.com/{UPSTREAM_REPO}/{TAG_PREFIX}{version}/{path}"
     )
+    if content is None and SOURCE_SUBDIR and not path.startswith(f"{SOURCE_SUBDIR}/"):
+        content = http_get(
+            f"https://raw.githubusercontent.com/{UPSTREAM_REPO}/{TAG_PREFIX}{version}/{SOURCE_SUBDIR}/{path}"
+        )
+    return content
 
 
-def charm_file(charm: Charm, path: str) -> str | None:
-    """A file from a charm's default branch."""
-    return http_get(f"https://raw.githubusercontent.com/{charm.repo}/HEAD/{path}")
+def charm_file(charm: Charm, path: str, branch: str = DEFAULT_CHARM_BRANCH) -> str | None:
+    """A file from a charm's target branch."""
+    return http_get(f"https://raw.githubusercontent.com/{charm.repo}/{branch}/{path}")
+
+
+def charmcraft_version(text: str, image: str | None = None) -> Version:
+    """The upstream rock version a charmcraft.yaml references in upstream-source."""
+    target_image = image if image is not None else ROCK_IMAGE
+    pattern = rf'upstream-source:\s*["\']?{re.escape(target_image)}:([^"\'\s]+)'
+    match = re.search(pattern, text)
+    if not match:
+        raise ValueError(f"no upstream-source for {target_image} in charmcraft.yaml")
+    return Version.parse(match.group(1))
+
+
+def resolve_from_version(
+    charms: Iterable[Charm],
+    fetch: Callable[[Charm, str], str | None],
+    image: str | None = None,
+) -> Version:
+    """Read the currently deployed rock version from the charms' charmcraft.yaml."""
+    versions: dict[str, Version] = {}
+    for charm in charms:
+        text = fetch(charm, "charmcraft.yaml")
+        if text is None:
+            raise ValueError(f"{charm.repo} has no charmcraft.yaml")
+        versions[charm.repo] = charmcraft_version(text, image=image)
+    if not versions:
+        raise ValueError("no charms configured to read version from")
+    unique = set(versions.values())
+    if len(unique) > 1:
+        details = ", ".join(f"{repo}={ver}" for repo, ver in versions.items())
+        print(f"::warning::Charms reference different versions ({details}); using the oldest.")
+    return min(unique)
 
 
 def read_charm_files(
     fetch: Callable[[Charm, str], str | None],
+    charms: Iterable[Charm] | None = None,
 ) -> list[tuple[Charm, str, str]]:
-    """The files of every charm that say how it configures and runs authentik."""
+    """The files of every charm that say how it configures and runs the workload."""
     found = []
-    for charm in CHARMS:
+    for charm in charms if charms is not None else CHARMS:
         for path in charm.files:
             text = fetch(charm, path)
             if text is None:
-                print(f"::warning::{charm.repo} has no {path}; update CHARMS in {__file__}")
+                print(f"::warning::{charm.repo} has no {path}; update charm files configuration")
             else:
                 found.append((charm, path, text))
     return found
 
 
 def notes_path(series: Series) -> str:
-    return RELEASE_NOTES_PATH.format(year=series[0], minor=series[1])
+    if not RELEASE_NOTES_PATH:
+        return ""
+    return RELEASE_NOTES_PATH.format(
+        year=series[0], major=series[0], minor=series[1]
+    )
 
 
 def release_notes(series: Series) -> str | None:
     """The release notes page of a series. Upstream keeps amending it on main."""
+    if not RELEASE_NOTES_PATH:
+        return None
     return http_get(
         f"https://raw.githubusercontent.com/{UPSTREAM_REPO}/main/{notes_path(series)}"
     )
+
+
+def github_release_notes(
+    frm: Version, to: Version, released: Iterable[Version]
+) -> dict[Series, str]:
+    """Fetch release notes from GitHub Releases for versions in (frm, to]."""
+    absorbed = [v for v in sorted(released) if frm < v <= to]
+    # Cap the number of individual release API calls to avoid rate limits.
+    if len(absorbed) > 12:
+        absorbed = absorbed[-12:]
+    headers: dict[str, str] = {"Accept": "application/vnd.github+json"}
+    if token := os.environ.get("GITHUB_TOKEN"):
+        headers["Authorization"] = f"Bearer {token}"
+
+    by_series: dict[Series, list[str]] = {}
+    for ver in absorbed:
+        url = (
+            f"https://api.github.com/repos/{UPSTREAM_REPO}/releases/tags/"
+            f"{TAG_PREFIX}{ver}"
+        )
+        try:
+            raw = http_get(url, headers=headers)
+        except TypeError:
+            raw = http_get(url)
+        if not raw:
+            continue
+        try:
+            payload = json.loads(raw)
+        except ValueError:
+            continue
+        body = (payload.get("body") or "").strip()
+        if body:
+            by_series.setdefault(ver.series, []).append(f"## {ver}\n\n{body}")
+
+    result: dict[Series, str] = {}
+    for series in (*{v.series for v in absorbed}, to.series):
+        chunks = by_series.get(series, [])
+        result[series] = clip("\n\n".join(chunks), MAX_NOTES_CHARS)
+    return result
 
 
 def list_released_versions() -> list[Version]:
@@ -283,8 +612,8 @@ class UpgradePath:
 def plan_upgrade(frm: Version, to: Version, released: Iterable[Version]) -> UpgradePath:
     """Place an upgrade among upstream's releases.
 
-    Upstream supports moving one series at a time, from the latest patch of the
-    current series, so both deviations are recorded.
+    Records skipped minor/series releases and whether a newer patch exists on the
+    current series.
     """
     released = list(released)
     skipped = sorted({v.series for v in released if frm.series < v.series < to.series})
@@ -297,8 +626,8 @@ def plan_upgrade(frm: Version, to: Version, released: Iterable[Version]) -> Upgr
 
 # Release notes
 
-FIXED_IN_RE = re.compile(r"Fixed in (\d{4}\.\d{1,2}\.\d+)", re.IGNORECASE)
-# Long sections that say nothing about how authentik is built, configured or run.
+FIXED_IN_RE = re.compile(r"Fixed in v?(\d+\.\d+\.\d+)", re.IGNORECASE)
+# Long sections that say nothing about how the workload is built, configured or run.
 IGNORED_SECTIONS = ("new integration guides", "new source guides", "api changes")
 MAX_NOTES_CHARS = 80_000
 
@@ -370,9 +699,313 @@ PROBES = (
     Probe("Web package manager", "web/package.json", _web_package_manager),
 )
 # Upstream's own image recipe and entrypoint, which rockcraft.yaml mirrors.
-DIFFED_FILES = ("lifecycle/container/Dockerfile", "lifecycle/ak")
+DIFFED_FILES: tuple[str, ...] = ("lifecycle/container/Dockerfile", "lifecycle/ak")
 
 Fetch = Callable[[Version, str], "str | None"]
+
+
+@dataclass(frozen=True)
+class DependencyOverride:
+    """A manual dependency bump in rockcraft.yaml and its upstream status."""
+
+    ecosystem: str  # "go", "go-toolchain", "python", "rust"
+    package: str
+    spec: str  # the exact token/requirement in rockcraft.yaml
+    min_version: str | None  # minimum version pinned in rockcraft.yaml, if any
+    upstream_file: str  # go.mod, uv.lock, Cargo.lock
+    before: str | None
+    after: str | None
+    status: str  # "satisfied", "removed", "bumped", "needed"
+
+
+def parse_dep_version(version_str: str | None) -> tuple[int, ...] | None:
+    """Parse a semantic/dotted version string into a tuple of ints for comparison."""
+    if not version_str:
+        return None
+    cleaned = version_str.strip().lstrip("v")
+    if re.search(r"-\d{14}-[0-9a-f]{12}$", cleaned):
+        return None
+    base = cleaned.split("-", 1)[0].split("+", 1)[0]
+    parts = base.split(".")
+    if not all(part.isdigit() for part in parts):
+        return None
+    return tuple(int(part) for part in parts)
+
+
+def _normalize_py_name(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def _go_mod_versions(text: str | None) -> dict[str, str]:
+    """Map Go module paths (and 'go' for the toolchain) to their versions in go.mod."""
+    if not text:
+        return {}
+    versions: dict[str, str] = {}
+    if go_match := re.search(r"^go\s+(\S+)", text, re.MULTILINE):
+        versions["go"] = go_match.group(1)
+    for line in text.splitlines():
+        line = line.split("//", 1)[0].strip()
+        if line.startswith("require "):
+            line = line.removeprefix("require ").strip()
+        match = re.fullmatch(r"([a-zA-Z0-9._/-]+)\s+(v\S+)", line)
+        if match:
+            versions[match.group(1)] = match.group(2)
+    return versions
+
+
+def _uv_lock_versions(text: str | None) -> dict[str, str]:
+    """Map normalized Python package names to their versions in uv.lock."""
+    if not text:
+        return {}
+    versions: dict[str, str] = {}
+    for block in text.split("[[package]]"):
+        name_m = re.search(r'^name\s*=\s*"([^"]+)"', block, re.MULTILINE)
+        ver_m = re.search(r'^version\s*=\s*"([^"]+)"', block, re.MULTILINE)
+        if name_m and ver_m:
+            versions[_normalize_py_name(name_m.group(1))] = ver_m.group(1)
+    return versions
+
+
+def _cargo_lock_versions(text: str | None) -> dict[str, str]:
+    """Map Rust crate names to their versions in Cargo.lock."""
+    if not text:
+        return {}
+    versions: dict[str, str] = {}
+    for block in text.split("[[package]]"):
+        name_m = re.search(r'^name\s*=\s*"([^"]+)"', block, re.MULTILINE)
+        ver_m = re.search(r'^version\s*=\s*"([^"]+)"', block, re.MULTILINE)
+        if name_m and ver_m:
+            versions[name_m.group(1)] = ver_m.group(1)
+    return versions
+
+
+def extract_rockcraft_overrides(
+    rockcraft_text: str,
+) -> list[tuple[str, str, str, str | None, str]]:
+    """Find manual CVE/dependency overrides in rockcraft.yaml.
+
+    Returns (ecosystem, package, spec, min_version, upstream_file) tuples.
+    """
+    found: list[tuple[str, str, str, str | None, str]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def add(
+        eco: str, pkg: str, spec: str, min_ver: str | None, up_file: str
+    ) -> None:
+        key = (eco, _normalize_py_name(pkg) if eco == "python" else pkg)
+        if key not in seen:
+            seen.add(key)
+            found.append((eco, pkg, spec, min_ver, up_file))
+
+    for match in re.finditer(r"go\s+mod\s+edit\s+-go=(\S+)", rockcraft_text):
+        ver = match.group(1)
+        add("go-toolchain", "go", match.group(0), ver, "go.mod")
+
+    for match in re.finditer(
+        r"go\s+mod\s+edit\s+-replace\s+([^\s=]+)=[^\s@]+@v?(\S+)", rockcraft_text
+    ):
+        pkg, ver = match.group(1), match.group(2)
+        add("go", pkg, match.group(0), f"v{ver.lstrip('v')}", "go.mod")
+
+    for match in re.finditer(r"go\s+get(?:\s+-\S+)*\s+([^\s\\#]+)", rockcraft_text):
+        target = match.group(1).strip("\"'")
+        if target in ("./...", "."):
+            continue
+        pkg, _, ver = target.partition("@")
+        min_ver = f"v{ver.lstrip('v')}" if ver and ver != "latest" else None
+        add("go", pkg, match.group(0), min_ver, "go.mod")
+
+    pip_block_re = re.compile(r"(?:uv\s+)?pip\s+install\b((?:.*\\\n)*.*)")
+    for block_match in pip_block_re.finditer(rockcraft_text):
+        block = block_match.group(0)
+        for req_match in re.finditer(
+            r'"([A-Za-z0-9_.-]+)(?:>=|==)([^",<\s]+)(?:,[^"\s]*)?"'
+            r"|'([A-Za-z0-9_.-]+)(?:>=|==)([^',<\s]+)(?:,[^'\s]*)?'",
+            block,
+        ):
+            pkg = req_match.group(1) or req_match.group(3)
+            ver = req_match.group(2) or req_match.group(4)
+            add("python", pkg, req_match.group(0), ver, "uv.lock")
+
+    for match in re.finditer(
+        r"cargo\s+update\s+(?:-\S+\s+)*-p\s+(\S+)\s+--precise\s+(\S+)", rockcraft_text
+    ):
+        pkg, ver = match.group(1).strip("\"'"), match.group(2).strip("\"'")
+        add("rust", pkg, match.group(0), ver, "Cargo.lock")
+
+    return found
+
+
+def compare_dependency_overrides(
+    rockcraft_text: str,
+    frm: Version,
+    to: Version,
+    fetch: Fetch,
+    base_rockcraft_text: str | None = None,
+) -> tuple[DependencyOverride, ...]:
+    """Compare dependency overrides in rockcraft.yaml against upstream lockfiles."""
+    raw = extract_rockcraft_overrides(rockcraft_text)
+    already_removed: set[tuple[str, str]] = set()
+    if base_rockcraft_text:
+        current_keys = {
+            (eco, _normalize_py_name(pkg) if eco == "python" else pkg)
+            for eco, pkg, _, _, _ in raw
+        }
+        for item in extract_rockcraft_overrides(base_rockcraft_text):
+            eco, pkg = item[0], item[1]
+            key = (eco, _normalize_py_name(pkg) if eco == "python" else pkg)
+            if key not in current_keys:
+                raw.append(item)
+                already_removed.add(key)
+    if not raw:
+        return ()
+
+    go_before = _go_mod_versions(fetch(frm, "go.mod"))
+    go_after = _go_mod_versions(fetch(to, "go.mod"))
+    py_before = _uv_lock_versions(fetch(frm, "uv.lock"))
+    py_after = _uv_lock_versions(fetch(to, "uv.lock"))
+    rs_before = _cargo_lock_versions(fetch(frm, "Cargo.lock"))
+    rs_after = _cargo_lock_versions(fetch(to, "Cargo.lock"))
+
+    results: list[DependencyOverride] = []
+    for eco, pkg, spec, min_ver, up_file in raw:
+        if eco in ("go", "go-toolchain"):
+            before = go_before.get(pkg)
+            after = go_after.get(pkg)
+        elif eco == "python":
+            key = _normalize_py_name(pkg)
+            before = py_before.get(key)
+            after = py_after.get(key)
+        else:
+            before = rs_before.get(pkg)
+            after = rs_after.get(pkg)
+
+        after_t = parse_dep_version(after)
+        before_t = parse_dep_version(before)
+        min_t = parse_dep_version(min_ver)
+        norm_key = (eco, _normalize_py_name(pkg) if eco == "python" else pkg)
+
+        if min_t and after_t and after_t >= min_t:
+            status = "removed" if norm_key in already_removed else "satisfied"
+        elif norm_key in already_removed:
+            continue
+        elif not min_t and after_t and before_t and after_t > before_t:
+            status = "bumped"
+        else:
+            status = "needed"
+
+        results.append(
+            DependencyOverride(
+                ecosystem=eco,
+                package=pkg,
+                spec=spec,
+                min_version=min_ver,
+                upstream_file=up_file,
+                before=before,
+                after=after,
+                status=status,
+            )
+        )
+    return tuple(results)
+
+
+def prune_rockcraft_overrides(
+    rockcraft_text: str, overrides: Iterable[DependencyOverride]
+) -> tuple[str, list[DependencyOverride]]:
+    """Remove satisfied dependency overrides from rockcraft.yaml."""
+    satisfied = [o for o in overrides if o.status == "satisfied"]
+    if not satisfied:
+        return rockcraft_text, []
+
+    lines = rockcraft_text.splitlines()
+    remove_indices: set[int] = set()
+    pruned: list[DependencyOverride] = []
+
+    single_line = [o for o in satisfied if o.ecosystem in ("go", "go-toolchain", "rust")]
+    for ov in single_line:
+        for idx, line in enumerate(lines):
+            if idx not in remove_indices and ov.spec in line:
+                remove_indices.add(idx)
+                if ov not in pruned:
+                    pruned.append(ov)
+
+    py_satisfied = [o for o in satisfied if o.ecosystem == "python"]
+    if py_satisfied:
+        i = 0
+        while i < len(lines):
+            if re.search(r"(?:uv\s+)?pip\s+install\b", lines[i]):
+                cmd_start = i
+                env_start = cmd_start
+                while env_start > 0 and re.match(
+                    r"^\s*[A-Z_][A-Z0-9_]*=.*\\\s*$", lines[env_start - 1]
+                ):
+                    env_start -= 1
+                comment_start = env_start
+                while comment_start > 0 and re.match(
+                    r"^\s*#.*(?:CVE|vulnerab|upgrade|bump)",
+                    lines[comment_start - 1],
+                    re.IGNORECASE,
+                ):
+                    comment_start -= 1
+
+                cmd_end = cmd_start
+                while cmd_end < len(lines) and lines[cmd_end].rstrip().endswith("\\"):
+                    cmd_end += 1
+                if cmd_end >= len(lines):
+                    cmd_end = len(lines) - 1
+
+                pkg_indices: list[int] = []
+                matched_indices: list[int] = []
+                for j in range(cmd_start, cmd_end + 1):
+                    if j == cmd_start and lines[j].rstrip().endswith("\\"):
+                        continue
+                    pkg_indices.append(j)
+                    for ov in py_satisfied:
+                        if ov.spec in lines[j]:
+                            matched_indices.append(j)
+                            if ov not in pruned:
+                                pruned.append(ov)
+                            break
+
+                if matched_indices:
+                    if len(matched_indices) == len(pkg_indices) and pkg_indices:
+                        for j in range(comment_start, cmd_end + 1):
+                            remove_indices.add(j)
+                    else:
+                        for j in matched_indices:
+                            remove_indices.add(j)
+                        remaining = [j for j in pkg_indices if j not in remove_indices]
+                        if remaining:
+                            last_rem = remaining[-1]
+                            lines[last_rem] = re.sub(r"\s*\\\s*$", "", lines[last_rem])
+                i = cmd_end + 1
+            else:
+                i += 1
+
+    if not remove_indices:
+        return rockcraft_text, []
+
+    if re.search(r"go\s+mod\s+tidy", rockcraft_text):
+        remaining_go = any(
+            idx not in remove_indices
+            and re.search(r"go\s+(?:get|mod\s+edit)\b", line)
+            for idx, line in enumerate(lines)
+        )
+        if not remaining_go:
+            for idx, line in enumerate(lines):
+                if re.match(r"^\s*go\s+mod\s+tidy\s*$", line):
+                    remove_indices.add(idx)
+
+    new_lines = [line for idx, line in enumerate(lines) if idx not in remove_indices]
+    cleaned: list[str] = []
+    for line in new_lines:
+        if not line.strip() and cleaned and not cleaned[-1].strip():
+            continue
+        cleaned.append(line)
+
+    trailing = "\n" if rockcraft_text.endswith("\n") else ""
+    pruned_ordered = [ov for ov in satisfied if ov in pruned]
+    return "\n".join(cleaned) + trailing, pruned_ordered
 
 
 @dataclass(frozen=True)
@@ -380,13 +1013,27 @@ class BuildInputs:
     facts: tuple[tuple[Probe, str | None, str | None], ...]  # probe, before, after
     diffs: tuple[tuple[str, str], ...]  # path and unified diff of each changed file
     files: tuple[tuple[str, str], ...]  # path and full text of each at the new version
+    overrides: tuple[DependencyOverride, ...] = ()  # manual dependency bumps in rockcraft.yaml
 
     @property
     def changed(self) -> bool:
-        return bool(self.diffs) or any(old != new for _, old, new in self.facts)
+        return (
+            bool(self.diffs)
+            or any(old != new for _, old, new in self.facts)
+            or any(
+                o.before != o.after or o.status in ("satisfied", "removed")
+                for o in self.overrides
+            )
+        )
 
 
-def compare_build_inputs(frm: Version, to: Version, fetch: Fetch) -> BuildInputs:
+def compare_build_inputs(
+    frm: Version,
+    to: Version,
+    fetch: Fetch,
+    rockcraft_text: str = "",
+    base_rockcraft_text: str | None = None,
+) -> BuildInputs:
     def read(probe: Probe, version: Version) -> str | None:
         text = fetch(version, probe.path)
         if text is None:
@@ -412,14 +1059,21 @@ def compare_build_inputs(frm: Version, to: Version, fetch: Fetch) -> BuildInputs
                 lineterm="",
             )
             diffs.append((path, "\n".join(lines)))
-    return BuildInputs(facts, tuple(diffs), tuple(files))
+    overrides = (
+        compare_dependency_overrides(
+            rockcraft_text, frm, to, fetch, base_rockcraft_text
+        )
+        if rockcraft_text or base_rockcraft_text
+        else ()
+    )
+    return BuildInputs(facts, tuple(diffs), tuple(files), overrides)
 
 
 # Text handling
 
 ZERO_WIDTH_SPACE = "​"
 URL_RE = re.compile(r"https?://[^\s<>()\[\]\"'`]+")
-TRUSTED_LINK_HOSTS = ("goauthentik.io", "docs.goauthentik.io")
+TRUSTED_LINK_HOSTS: tuple[str, ...] = ("goauthentik.io", "docs.goauthentik.io")
 
 
 def clip(text: str, limit: int) -> str:
@@ -469,9 +1123,18 @@ def render(template: str, values: Mapping[str, str]) -> str:
     Values are never rescanned, so text that happens to contain a placeholder is
     left alone, and a placeholder without a value is an error.
     """
+    defaults = {"WORKLOAD": WORKLOAD, "RESOURCE": "oci-image"}
+    merged = {**defaults, **values}
     text = (TEMPLATES / template).read_text(encoding="utf-8")
-    filled = PLACEHOLDER_RE.sub(lambda match: values[match.group(1)], text)
+    filled = PLACEHOLDER_RE.sub(lambda match: merged[match.group(1)], text)
     return re.sub(r"\n{3,}", "\n\n", filled).strip() + "\n"
+
+
+def render_inline(template_text: str, values: Mapping[str, str]) -> str:
+    """Fill {{ NAME }} placeholders in an inline configuration string."""
+    defaults = {"WORKLOAD": WORKLOAD, "RESOURCE": "oci-image"}
+    merged = {**defaults, **values}
+    return PLACEHOLDER_RE.sub(lambda match: merged[match.group(1)], template_text)
 
 
 # LLM analysis
@@ -497,26 +1160,41 @@ def _array(items: dict) -> dict:
 
 
 _TEXT = {"type": "string"}
-_APPLIES_TO = {"type": "string", "enum": [*(charm.key for charm in CHARMS), "both"]}
 
-ANALYSIS_SCHEMA = _object(
-    risk=_object(
-        level={"type": "string", "enum": list(RISK_LEVELS)},
-        summary=_TEXT,
-        drivers=_array(_object(title=_TEXT, detail=_TEXT, source=_TEXT)),
-    ),
-    rock=_object(
-        summary=_TEXT,
-        changes=_array(_object(title=_TEXT, detail=_TEXT)),
-    ),
-    charm=_object(
-        summary=_TEXT,
-        changes=_array(_object(applies_to=_APPLIES_TO, title=_TEXT, detail=_TEXT)),
-        validation=_array(
-            _object(applies_to=_APPLIES_TO, title=_TEXT, why=_TEXT, how=_TEXT, expected=_TEXT)
+
+def build_analysis_schema(charms: Iterable[Charm] | None = None) -> dict:
+    charm_list = tuple(charms) if charms is not None else CHARMS
+    keys = [*(charm.key for charm in charm_list), "both"]
+    if len(charm_list) > 2 and "all" not in keys:
+        keys.append("all")
+    applies_to = {"type": "string", "enum": keys}
+    return _object(
+        risk=_object(
+            level={"type": "string", "enum": list(RISK_LEVELS)},
+            summary=_TEXT,
+            drivers=_array(_object(title=_TEXT, detail=_TEXT, source=_TEXT)),
         ),
-    ),
-)
+        rock=_object(
+            summary=_TEXT,
+            changes=_array(_object(title=_TEXT, detail=_TEXT)),
+        ),
+        charm=_object(
+            summary=_TEXT,
+            changes=_array(_object(applies_to=applies_to, title=_TEXT, detail=_TEXT)),
+            validation=_array(
+                _object(
+                    applies_to=applies_to,
+                    title=_TEXT,
+                    why=_TEXT,
+                    how=_TEXT,
+                    expected=_TEXT,
+                )
+            ),
+        ),
+    )
+
+
+ANALYSIS_SCHEMA = build_analysis_schema(CHARMS)
 
 
 def schema_errors(value: Any, schema: dict, where: str = "$") -> list[str]:
@@ -546,13 +1224,17 @@ def schema_errors(value: Any, schema: dict, where: str = "$") -> list[str]:
     return []
 
 
-def tidy(value: Any, schema: dict = ANALYSIS_SCHEMA) -> Any:
+def tidy(value: Any, schema: dict | None = None) -> Any:
     """Sanitize every free-text field of a valid analysis and bound its lists."""
-    if schema["type"] == "object":
-        return {key: tidy(value[key], sub) for key, sub in schema["properties"].items()}
-    if schema["type"] == "array":
-        return [tidy(item, schema["items"]) for item in value[:MAX_ITEMS]]
-    return value if "enum" in schema else sanitize(value, MAX_FIELD_CHARS)
+    active_schema = schema or build_analysis_schema()
+    if active_schema["type"] == "object":
+        return {
+            key: tidy(value[key], sub)
+            for key, sub in active_schema["properties"].items()
+        }
+    if active_schema["type"] == "array":
+        return [tidy(item, active_schema["items"]) for item in value[:MAX_ITEMS]]
+    return value if "enum" in active_schema else sanitize(value, MAX_FIELD_CHARS)
 
 
 class LLMError(Exception):
@@ -613,6 +1295,7 @@ def http_post_json(url: str, payload: dict, headers: dict) -> Any:
 
 def ask(provider: Provider, system: str, user: str, post: Post) -> dict:
     """Get one analysis from a provider, validated and sanitized."""
+    active_schema = build_analysis_schema()
     payload = {
         "model": provider.model,
         "temperature": 0,
@@ -623,7 +1306,7 @@ def ask(provider: Provider, system: str, user: str, post: Post) -> dict:
     }
     strict = {
         "type": "json_schema",
-        "json_schema": {"name": "upgrade_analysis", "strict": True, "schema": ANALYSIS_SCHEMA},
+        "json_schema": {"name": "upgrade_analysis", "strict": True, "schema": active_schema},
     }
     # Not every provider and model accepts a schema here. The prompt spells the
     # schema out and the reply is validated below, so plain JSON mode is enough.
@@ -643,10 +1326,10 @@ def ask(provider: Provider, system: str, user: str, post: Post) -> dict:
         analysis = json.loads(re.sub(r"^```(?:json)?\s*|\s*```$", "", content.strip()))
     except (KeyError, IndexError, TypeError, AttributeError, ValueError) as error:
         raise LLMError(f"unusable reply: {error!r}") from error
-    errors = schema_errors(analysis, ANALYSIS_SCHEMA)
+    errors = schema_errors(analysis, active_schema)
     if errors:
         raise LLMError("reply does not match the schema: " + "; ".join(errors[:5]))
-    return tidy(analysis)
+    return tidy(analysis, active_schema)
 
 
 def analyse(
@@ -666,9 +1349,14 @@ def system_prompt() -> str:
     charms = "\n".join(
         f"- `{charm.key}`: {charm.repo}. {charm.description}" for charm in CHARMS
     )
+    active_schema = build_analysis_schema()
     return render(
         "analysis_prompt.md.tmpl",
-        {"CHARMS": charms, "SCHEMA": json.dumps(ANALYSIS_SCHEMA, indent=2)},
+        {
+            "WORKLOAD": WORKLOAD,
+            "CHARMS": charms,
+            "SCHEMA": json.dumps(active_schema, indent=2),
+        },
     )
 
 
@@ -696,10 +1384,40 @@ def user_prompt(
     )
     parts = [
         f"Third-party content is wrapped in <{tag}> tags. Only that exact tag closes it.",
-        f"# Upgrade\n\nauthentik {path.frm} -> {path.to} ({path.kind} bump)."
+        f"# Upgrade\n\n{WORKLOAD} {path.frm} -> {path.to} ({path.kind} bump)."
         + "".join(f"\n{line}" for line in path_facts(path)),
         f"# Build inputs\n\nRead from upstream's source at both tags.\n\n{facts}",
     ]
+    if inputs.overrides:
+        override_lines = []
+        for ov in inputs.overrides:
+            status_desc = {
+                "satisfied": (
+                    f"SATISFIED upstream ({ov.after} >= {ov.min_version}) — "
+                    "can be removed from rockcraft.yaml"
+                ),
+                "removed": (
+                    f"SATISFIED upstream ({ov.after} >= {ov.min_version}) — "
+                    "already removed from rockcraft.yaml in this PR"
+                ),
+                "bumped": (
+                    f"BUMPED upstream ({ov.before} -> {ov.after}) — "
+                    "verify if override in rockcraft.yaml can be removed"
+                ),
+                "needed": (
+                    f"STILL NEEDED (upstream is at {ov.after or 'not found'}, "
+                    f"rockcraft.yaml pins {ov.min_version or 'latest'})"
+                ),
+            }[ov.status]
+            override_lines.append(
+                f"- {ov.package} ({ov.upstream_file}, `{ov.spec}`): "
+                f"{ov.before or 'not found'} -> {ov.after or 'not found'} [{status_desc}]"
+            )
+        parts.append(
+            "# Dependency overrides in rockcraft.yaml\n\n"
+            "Manual CVE/dependency overrides found in rockcraft.yaml compared against "
+            "upstream lockfiles:\n\n" + "\n".join(override_lines)
+        )
     parts += [
         untrusted(f"diff of {name} between the tags", clip(diff, MAX_FILE_CHARS))
         for name, diff in inputs.diffs
@@ -711,8 +1429,8 @@ def user_prompt(
     ]
     parts.append(f"# The rock's current rockcraft.yaml\n\n<rockcraft>\n{rockcraft}\n</rockcraft>")
     parts.append(
-        "# How the charms configure and run authentik\n\n"
-        "Files from each charm's default branch."
+        f"# How the charms configure and run {WORKLOAD}\n\n"
+        "Files from each charm's target branch."
     )
     parts += [
         f'<charm-file charm="{charm.key}" path="{name}">\n'
@@ -732,6 +1450,8 @@ def user_prompt(
 
 def path_facts(path: UpgradePath) -> list[str]:
     """Plain statements about where an upgrade sits among upstream's releases."""
+    if not ENFORCE_SEQUENTIAL_SERIES:
+        return []
     facts = []
     if path.skipped:
         names = ", ".join(series_name(series) for series in path.skipped)
@@ -748,8 +1468,8 @@ def path_facts(path: UpgradePath) -> list[str]:
 
 
 def apply_path_floor(analysis: dict, path: UpgradePath) -> dict:
-    """Skipping a series is high risk whatever the model made of the notes."""
-    if not path.skipped:
+    """Skipping a series is high risk when sequential series upgrades are required."""
+    if not ENFORCE_SEQUENTIAL_SERIES or not path.skipped:
         return analysis
     names = ", ".join(series_name(series) for series in path.skipped)
     driver = {
@@ -764,10 +1484,11 @@ def apply_path_floor(analysis: dict, path: UpgradePath) -> dict:
 def upstream_links(path: UpgradePath) -> str:
     base = f"https://github.com/{UPSTREAM_REPO}"
     links = [f"[release {path.to}]({base}/releases/tag/{TAG_PREFIX}{path.to})"]
-    links += [
-        f"[{series_name(series)} release notes]({base}/blob/main/{notes_path(series)})"
-        for series in path.absorbed_series
-    ]
+    if RELEASE_NOTES_PATH:
+        links += [
+            f"[{series_name(series)} release notes]({base}/blob/main/{notes_path(series)})"
+            for series in path.absorbed_series
+        ]
     links.append(f"[source diff]({base}/compare/{TAG_PREFIX}{path.frm}...{TAG_PREFIX}{path.to})")
     return ", ".join(links)
 
@@ -778,7 +1499,7 @@ def _bullets(items: Iterable[dict], *, checkbox: bool = False) -> str:
 
 
 def _for_charm(items: Iterable[dict], charm: Charm) -> list[dict]:
-    return [item for item in items if item["applies_to"] in (charm.key, "both")]
+    return [item for item in items if item["applies_to"] in (charm.key, "both", "all")]
 
 
 ALERTS = {"low": "NOTE", "medium": "WARNING", "high": "CAUTION"}
@@ -828,6 +1549,31 @@ def render_pr_comment(
             f"\n\n<details><summary>Diff of <code>{name}</code></summary>\n\n"
             f"````diff\n{body}\n````\n\n</details>"
         )
+    if inputs.overrides:
+        ov_rows = [
+            f"| Package | Upstream file | `rockcraft.yaml` override | {path.frm} | {path.to} | Status |",
+            "|---|---|---|---|---|---|",
+        ]
+        status_labels = {
+            "satisfied": "**Satisfied upstream (can remove)**",
+            "removed": "**Satisfied upstream (removed)**",
+            "bumped": "**Bumped upstream (check if removable)**",
+            "needed": "Still needed",
+        }
+        for ov in inputs.overrides:
+            pkg_cell = (
+                f"**{code(ov.package)}**" if ov.status != "needed" else code(ov.package)
+            )
+            ov_rows.append(
+                f"| {pkg_cell} | `{ov.upstream_file}` | {code(ov.spec)} "
+                f"| {code(ov.before or '-')} | {code(ov.after or '-')} "
+                f"| {status_labels[ov.status]} |"
+            )
+        build_block += (
+            "\n\n### Dependency overrides in `rockcraft.yaml`\n\n"
+            "Manual CVE/dependency overrides compared against upstream lockfiles.\n\n"
+            + "\n".join(ov_rows)
+        )
     if not inputs.changed:
         build_block += "\n\nNone of them changed."
 
@@ -851,7 +1597,7 @@ def render_pr_comment(
             if checks:
                 titles = "\n".join(f"- {check['title']}" for check in checks)
                 charm_block += (
-                    f"\n\n<details><summary>Validation needed on {charm.app} "
+                    f"\n\n<details><summary>Validation needed on {charm.app or charm.key} "
                     f"({len(checks)})</summary>\n\n{titles}\n\n</details>"
                 )
         footer += (
@@ -862,6 +1608,7 @@ def render_pr_comment(
     return render(
         "pr_comment.md.tmpl",
         {
+            "WORKLOAD": WORKLOAD,
             "FROM": str(path.frm),
             "TO": str(path.to),
             "RISK": risk_block,
@@ -875,7 +1622,7 @@ def render_pr_comment(
 
 
 def charm_issue_title(path: UpgradePath) -> str:
-    return f"Upgrade to authentik {path.to}"
+    return f"Upgrade to {WORKLOAD} {path.to}"
 
 
 def render_charm_issue(
@@ -892,15 +1639,23 @@ def render_charm_issue(
         "- [ ] Validated"
         for number, check in enumerate(checks, 1)
     )
+    in_place_values = {
+        "WORKLOAD": WORKLOAD,
+        "FROM": str(path.frm),
+        "TO": str(path.to),
+        "APP": charm.app,
+        "CONTAINER": charm.container,
+        "SERVICE": charm.service,
+        "RESOURCE": charm.resource,
+        "IMAGE": image,
+    }
+    in_place_text = render_inline(
+        charm.in_place_upgrade or DEFAULT_IN_PLACE_UPGRADE, in_place_values
+    )
     return render(
         "charm_issue.md.tmpl",
         {
-            "FROM": str(path.frm),
-            "TO": str(path.to),
-            "APP": charm.app,
-            "CONTAINER": charm.container,
-            "SERVICE": charm.service,
-            "IMAGE": image,
+            **in_place_values,
             "MODEL": model,
             "WORKFLOW": CHARM_ISSUES_WORKFLOW,
             "SOURCES": upstream_links(path),
@@ -914,6 +1669,7 @@ def render_charm_issue(
             "CHARM_CHANGES": _bullets(changes, checkbox=True),
             "VALIDATION": validation
             or "The analysis found nothing specific to this charm beyond the baseline below.",
+            "IN_PLACE_UPGRADE": in_place_text,
         },
     )
 
@@ -932,19 +1688,39 @@ def write_outputs(values: Mapping[str, str]) -> None:
 
 def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    source = parser.add_mutually_exclusive_group(required=True)
-    source.add_argument("--from", dest="frm", help="version the rock builds today")
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=DEFAULT_CONFIG_PATH,
+        help=f"per-repository configuration file (default: {DEFAULT_CONFIG_PATH})",
+    )
+    source = parser.add_mutually_exclusive_group(required=False)
+    source.add_argument(
+        "--from",
+        dest="frm",
+        help="version the rock builds today (default: read from charmcraft.yaml on --target-branch)",
+    )
     source.add_argument(
         "--from-rockcraft", type=Path, help="rockcraft.yaml to read that version from"
     )
     parser.add_argument("--to", help="version the rock moves to (default: --rockcraft's)")
+    parser.add_argument(
+        "--target-branch",
+        default=DEFAULT_CHARM_BRANCH,
+        help=f"branch in the charm repositories to read charm files from (default: {DEFAULT_CHARM_BRANCH})",
+    )
     parser.add_argument(
         "--rockcraft",
         type=Path,
         default=Path("rockcraft.yaml"),
         help="the rock's recipe, shown to the LLM (default: rockcraft.yaml)",
     )
-    parser.add_argument("--image", help=f"published image (default: {ROCK_IMAGE}:<to>)")
+    parser.add_argument(
+        "--prune-overrides",
+        action="store_true",
+        help="remove satisfied dependency overrides from --rockcraft in place",
+    )
+    parser.add_argument("--image", help="published image (default: <rock_image>:<to>)")
     parser.add_argument("--out-dir", type=Path, default=Path(".artifacts"))
     parser.add_argument(
         "--require-llm", action="store_true", help="fail when the LLM analysis is unavailable"
@@ -953,8 +1729,34 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> int:
+    global CHARMS
     args = parse_args(argv)
-    frm = Version.parse(args.frm) if args.frm else rockcraft_version(args.from_rockcraft)
+    configure_from_files(args.config, args.rockcraft)
+
+    def fetch_charm(charm: Charm, path: str) -> str | None:
+        return charm_file(charm, path, branch=args.target_branch)
+
+    # Enrich charms from their charmcraft.yaml when app/container/resource are not explicitly set.
+    enriched_charms: list[Charm] = []
+    for charm in CHARMS:
+        if not charm.app or not charm.container:
+            cc_text = fetch_charm(charm, "charmcraft.yaml")
+            if cc_text:
+                charm = enrich_charm_from_charmcraft(charm, cc_text, ROCK_IMAGE)
+        enriched_charms.append(charm)
+    CHARMS = tuple(enriched_charms)
+
+    if args.frm:
+        frm = Version.parse(args.frm)
+    elif args.from_rockcraft:
+        frm = rockcraft_version(args.from_rockcraft)
+    else:
+        try:
+            frm = resolve_from_version(CHARMS, fetch_charm, image=ROCK_IMAGE)
+        except ValueError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 1
+
     to = Version.parse(args.to) if args.to else rockcraft_version(args.rockcraft)
     if to <= frm:
         print(f"Nothing to assess: {frm} -> {to} is not an upgrade.")
@@ -967,11 +1769,50 @@ def main(argv: list[str] | None = None) -> int:
             print(f"error: {version} is not a release of {UPSTREAM_REPO}", file=sys.stderr)
             return 1
     path = plan_upgrade(frm, to, released)
-    inputs = compare_build_inputs(frm, to, upstream_file)
-    notes = {
-        series: relevant_notes(release_notes(series) or "", path)
-        for series in path.absorbed_series
-    }
+    rockcraft_text = (
+        args.rockcraft.read_text(encoding="utf-8") if args.rockcraft.exists() else ""
+    )
+    base_rockcraft_text = (
+        args.from_rockcraft.read_text(encoding="utf-8")
+        if args.from_rockcraft and args.from_rockcraft.exists()
+        else None
+    )
+    inputs = compare_build_inputs(
+        frm, to, upstream_file, rockcraft_text, base_rockcraft_text
+    )
+
+    pruned_list: list[DependencyOverride] = []
+    if args.prune_overrides and rockcraft_text:
+        rockcraft_text, pruned_list = prune_rockcraft_overrides(
+            rockcraft_text, inputs.overrides
+        )
+        if pruned_list:
+            args.rockcraft.write_text(rockcraft_text, encoding="utf-8")
+            pruned_set = set(pruned_list)
+            updated_overrides = tuple(
+                DependencyOverride(
+                    ecosystem=ov.ecosystem,
+                    package=ov.package,
+                    spec=ov.spec,
+                    min_version=ov.min_version,
+                    upstream_file=ov.upstream_file,
+                    before=ov.before,
+                    after=ov.after,
+                    status="removed" if ov in pruned_set else ov.status,
+                )
+                for ov in inputs.overrides
+            )
+            inputs = BuildInputs(
+                inputs.facts, inputs.diffs, inputs.files, updated_overrides
+            )
+
+    if RELEASE_NOTES_PATH:
+        notes = {
+            series: relevant_notes(release_notes(series) or "", path)
+            for series in path.absorbed_series
+        }
+    else:
+        notes = github_release_notes(frm, to, released)
 
     providers = providers_from_env(os.environ)
     analysis, model, failures = None, "", []
@@ -980,8 +1821,8 @@ def main(argv: list[str] | None = None) -> int:
             path,
             inputs,
             notes,
-            args.rockcraft.read_text(encoding="utf-8"),
-            read_charm_files(charm_file),
+            rockcraft_text,
+            read_charm_files(fetch_charm, CHARMS),
         )
         analysis, model, failures = analyse(providers, system_prompt(), prompt, http_post_json)
     for failure in failures:
@@ -1026,6 +1867,7 @@ def main(argv: list[str] | None = None) -> int:
             "to": str(to),
             "kind": path.kind,
             "risk": analysis["risk"]["level"] if analysis else "",
+            "pruned": "true" if pruned_list else "false",
         }
     )
     return 0
