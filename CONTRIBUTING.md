@@ -74,14 +74,16 @@ Moving the rock to a new authentik release is driven by three pieces:
    are never auto-approved or automerged.
 2. The `Upstream upgrade` workflow comments on any pull request that changes
    the version in `rockcraft.yaml`. The comment compares the upstream files the
-   rock's build depends on (toolchains, package manager, Dockerfile) between
-   the two versions, and adds an LLM's judgement of the upgrade risk.
+   rock's build depends on (toolchains, package manager, Dockerfile) and any
+   manual dependency overrides in `rockcraft.yaml` between the two versions,
+   automatically removes overrides that are satisfied by the new upstream
+   lockfiles, and adds an LLM's judgement of the upgrade risk.
 3. The `Upstream charm upgrade issues` workflow opens an issue on each charm
    repository with the changes to make and the checks to run. It is run by
-   hand, with the version the charms are on, when they are ready to upgrade.
-   Nothing is filed when the rock publishes, because the rock follows upstream
-   more closely than the charms do. The workflow only previews the issues in
-   its run summary until its dry-run input is turned off.
+   hand when the charms are ready to upgrade, and reads the version the charms
+   are currently on from `charmcraft.yaml` on the target branch (`main` by
+   default). Nothing is filed when the rock publishes, because the rock follows
+   upstream more closely than the charms do.
 
 The LLM is shown the upstream release notes and build files, `rockcraft.yaml`,
 and the files of each charm that decide how it configures and runs authentik.

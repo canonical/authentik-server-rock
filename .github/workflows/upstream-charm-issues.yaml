@@ -1,5 +1,5 @@
 name: Upstream charm upgrade issues
-run-name: Charm upgrade issues from authentik ${{ inputs.from-version }}
+run-name: Charm upgrade issues for branch ${{ inputs.target-branch || 'main' }}
 
 # Open an issue on each charm that describes an upgrade to a newer rock and what
 # has to be validated. Run it by hand when the charms are ready to move: the rock
@@ -8,10 +8,11 @@ run-name: Charm upgrade issues from authentik ${{ inputs.from-version }}
 on:
   workflow_dispatch:
     inputs:
-      from-version:
-        description: "Upstream version the charms are on, e.g. 2026.5.3"
+      target-branch:
+        description: "Target branch in the charm repositories"
         type: string
-        required: true
+        required: false
+        default: "main"
       to-version:
         description: "Upstream version to move to (default: the one in rockcraft.yaml)"
         type: string
@@ -26,7 +27,7 @@ on:
         description: "Generate the issues without opening them"
         type: boolean
         required: false
-        default: true
+        default: false
 
 permissions:
   contents: read
@@ -41,7 +42,7 @@ jobs:
       - name: Analyse the upgrade
         id: analysis
         env:
-          FROM_VERSION: ${{ inputs.from-version }}
+          TARGET_BRANCH: ${{ inputs.target-branch || 'main' }}
           TO_VERSION: ${{ inputs.to-version }}
           IMAGE: ${{ inputs.image }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -50,7 +51,7 @@ jobs:
           OPENROUTER_MODEL: ${{ vars.OPENROUTER_MODEL }}
         run: |
           # The issues are the LLM's output, so fail rather than file empty ones.
-          args=(--require-llm --from "$FROM_VERSION" --out-dir "$RUNNER_TEMP/upgrade")
+          args=(--require-llm --target-branch "$TARGET_BRANCH" --out-dir "$RUNNER_TEMP/upgrade")
           if [ -n "$TO_VERSION" ]; then
             args+=(--to "$TO_VERSION")
           fi

@@ -75,8 +75,30 @@ Thousands of lines.
 UPSTREAM_FILES = {
     ("2026.5.3", "rust-toolchain.toml"): '[toolchain]\nchannel = "1.95.0"\n',
     ("2026.8.3", "rust-toolchain.toml"): '[toolchain]\nchannel = "1.97.1"\n',
-    ("2026.5.3", "go.mod"): "module goauthentik.io\n\ngo 1.26.0\n",
-    ("2026.8.3", "go.mod"): "module goauthentik.io\n\ngo 1.27.0\n",
+    ("2026.5.3", "go.mod"): (
+        "module goauthentik.io\n\ngo 1.26.0\n\n"
+        "require (\n"
+        "\tgolang.org/x/net v0.49.0\n"
+        "\tgithub.com/klauspost/compress v1.18.0\n"
+        ")\n"
+    ),
+    ("2026.8.3", "go.mod"): (
+        "module goauthentik.io\n\ngo 1.27.0\n\n"
+        "require (\n"
+        "\tgolang.org/x/net v0.61.0\n"
+        "\tgithub.com/klauspost/compress v1.18.4\n"
+        ")\n"
+    ),
+    ("2026.5.3", "uv.lock"): (
+        '[[package]]\nname = "django"\nversion = "5.2.12"\n\n'
+        '[[package]]\nname = "cryptography"\nversion = "46.0.5"\n'
+    ),
+    ("2026.8.3", "uv.lock"): (
+        '[[package]]\nname = "django"\nversion = "5.2.17"\n\n'
+        '[[package]]\nname = "cryptography"\nversion = "46.0.6"\n'
+    ),
+    ("2026.5.3", "Cargo.lock"): '[[package]]\nname = "quinn-proto"\nversion = "0.11.13"\n',
+    ("2026.8.3", "Cargo.lock"): '[[package]]\nname = "quinn-proto"\nversion = "0.11.14"\n',
     ("2026.5.3", "pyproject.toml"): 'requires-python = "==3.14.*"\n',
     ("2026.8.3", "pyproject.toml"): 'requires-python = "==3.14.*"\n',
     ("2026.5.3", "Cargo.toml"): 'pyo3 = "= 0.28.3"\n',
@@ -100,6 +122,14 @@ def fake_charm_fetch(charm, path):
     """Every configured charm file exists, except the worker's constants."""
     if (charm.key, path) == ("worker", "src/constants.py"):
         return None
+    if path == "charmcraft.yaml":
+        return (
+            f"name: {charm.app}\n"
+            "resources:\n"
+            "  oci-image:\n"
+            "    type: oci-image\n"
+            f"    upstream-source: {uu.ROCK_IMAGE}:2026.5.3\n"
+        )
     return f"# {path} of the {charm.key} charm\nAUTHENTIK_POSTGRESQL__USE_PGBOUNCER\n"
 
 
@@ -107,8 +137,13 @@ def fake_http_get(url):
     """Serve UPSTREAM_FILES, NOTES and charm files at the URLs the script builds."""
     raw = "https://raw.githubusercontent.com/"
     for charm in uu.CHARMS:
-        if url.startswith(f"{raw}{charm.repo}/HEAD/"):
-            return fake_charm_fetch(charm, url.split("/HEAD/", 1)[1])
+        charm_prefix = f"{raw}{charm.repo}/"
+        if url.startswith(charm_prefix):
+            rest = url[len(charm_prefix) :]
+            for candidate in charm.files:
+                if rest.endswith(f"/{candidate}"):
+                    return fake_charm_fetch(charm, candidate)
+            return None
     prefix = f"{raw}{uu.UPSTREAM_REPO}/"
     assert url.startswith(prefix), url
     ref, _, path = url[len(prefix) :].removeprefix(uu.TAG_PREFIX).partition("/")
@@ -173,9 +208,13 @@ OPENROUTER = Provider("OpenRouter", "https://openrouter.example/chat", "o-key", 
 
 
 class VersionTest(unittest.TestCase):
-    def test_parses_and_orders_releases(self):
+    def test_parses_and_orders_calver_and_semver_releases(self):
         self.assertEqual(str(V("2026.8.3")), "2026.8.3")
         self.assertEqual(V("2026.8.3").series, (2026, 8))
+        self.assertEqual(V("2026.8.3").year, 2026)
+        self.assertEqual(str(V("2.4.0")), "2.4.0")
+        self.assertEqual(V("2.4.0").series, (2, 4))
+        self.assertLess(V("2.2.0"), V("2.4.0"))
         self.assertLess(V("2026.5.7"), V("2026.8.0"))
         self.assertLess(V("2025.12.6"), V("2026.2.0"))
         self.assertLess(V("2026.8.3"), V("2026.11.0"))
@@ -190,6 +229,94 @@ class VersionTest(unittest.TestCase):
             rockcraft = Path(tmp) / "rockcraft.yaml"
             rockcraft.write_text('name: authentik-server\nversion: "2026.5.3"\n')
             self.assertEqual(uu.rockcraft_version(rockcraft), V("2026.5.3"))
+
+    def test_reads_the_version_a_charmcraft_file_uses(self):
+        text = (
+            "name: authentik-server\n"
+            "resources:\n"
+            "  oci-image:\n"
+            "    type: oci-image\n"
+            "    upstream-source: ghcr.io/canonical/authentik-server:2026.5.3\n"
+        )
+        self.assertEqual(uu.charmcraft_version(text), V("2026.5.3"))
+        with self.assertRaises(ValueError):
+            uu.charmcraft_version("name: authentik-server\n")
+
+    def test_resolves_from_version_across_charms(self):
+        self.assertEqual(uu.resolve_from_version(uu.CHARMS, fake_charm_fetch), V("2026.5.3"))
+
+        def mismatched_fetch(charm, path):
+            ver = "2026.5.0" if charm.key == "server" else "2026.5.3"
+            return f"upstream-source: {uu.ROCK_IMAGE}:{ver}\n"
+
+        log = io.StringIO()
+        with contextlib.redirect_stdout(log):
+            resolved = uu.resolve_from_version(uu.CHARMS, mismatched_fetch)
+        self.assertEqual(resolved, V("2026.5.0"))
+        self.assertIn("::warning::Charms reference different versions", log.getvalue())
+
+
+class AutoDetectionAndConfigTest(unittest.TestCase):
+    def test_inspects_authentik_hydra_and_glauth_rockcraft_files(self):
+        authentik_rc = (
+            'name: authentik-server\nversion: "2026.5.8"\n'
+            "services:\n  authentik-server:\n    override: replace\n"
+            "parts:\n  go-server:\n    source: https://github.com/goauthentik/authentik\n"
+            "    source-tag: version/2026.5.8\n"
+        )
+        meta = uu.inspect_rockcraft(authentik_rc)
+        self.assertEqual(meta.name, "authentik-server")
+        self.assertEqual(meta.version, V("2026.5.8"))
+        self.assertEqual(meta.rock_image, "ghcr.io/canonical/authentik-server")
+        self.assertEqual(meta.upstream_repo, "goauthentik/authentik")
+        self.assertEqual(meta.tag_prefix, "version/")
+        self.assertEqual(meta.source_subdir, "")
+        self.assertEqual(meta.service, "authentik-server")
+
+        glauth_rc = (
+            'name: glauth\nversion: "2.4.0"\n'
+            "services:\n  glauth:\n    override: replace\n"
+            "parts:\n  glauth:\n    source: https://github.com/glauth/glauth\n"
+            "    source-subdir: v2\n"
+            "    source-tag: v2.4.0\n"
+        )
+        g_meta = uu.inspect_rockcraft(glauth_rc)
+        self.assertEqual(g_meta.upstream_repo, "glauth/glauth")
+        self.assertEqual(g_meta.tag_prefix, "v")
+        self.assertEqual(g_meta.source_subdir, "v2")
+        self.assertEqual(g_meta.rock_image, "ghcr.io/canonical/glauth")
+
+    def test_enriches_charm_from_charmcraft_including_custom_resource_name(self):
+        openfga_charmcraft = (
+            "name: openfga-k8s\n"
+            "containers:\n"
+            "  openfga:\n"
+            "    resource: openfga-image\n"
+            "resources:\n"
+            "  openfga-image:\n"
+            "    type: oci-image\n"
+            "    upstream-source: ghcr.io/canonical/openfga:1.11.2\n"
+        )
+        charm = uu.Charm(key="openfga", repo="canonical/openfga-operator")
+        enriched = uu.enrich_charm_from_charmcraft(
+            charm, openfga_charmcraft, "ghcr.io/canonical/openfga", default_service="openfga"
+        )
+        self.assertEqual(enriched.app, "openfga-k8s")
+        self.assertEqual(enriched.container, "openfga")
+        self.assertEqual(enriched.service, "openfga")
+        self.assertEqual(enriched.resource, "openfga-image")
+
+    def test_github_release_notes_fallback(self):
+        def fake_api_get(url, headers=None):
+            if url.endswith("/tags/v2.4.0"):
+                return json.dumps({"body": "Added OIDC support"})
+            return None
+
+        with patch.object(uu, "http_get", fake_api_get), patch.object(uu, "TAG_PREFIX", "v"):
+            notes = uu.github_release_notes(
+                V("2.2.0"), V("2.4.0"), [V("2.2.0"), V("2.4.0")]
+            )
+        self.assertIn("Added OIDC support", notes[(2, 4)])
 
 
 class UpgradePathTest(unittest.TestCase):
@@ -270,6 +397,99 @@ class BuildInputsTest(unittest.TestCase):
         self.assertTrue(all(old is None and new is None for _, old, new in inputs.facts))
         self.assertFalse(inputs.changed)
         self.assertEqual(inputs.files, ())
+
+
+class DependencyOverridesTest(unittest.TestCase):
+    ROCKCRAFT_WITH_OVERRIDES = (
+        'name: authentik-server\nversion: "2026.8.3"\n'
+        "parts:\n"
+        "  go-server:\n"
+        "    override-build: |\n"
+        "      go mod edit -go=1.26.2\n"
+        "      go get golang.org/x/net@v0.61.0\n"
+        "      go get github.com/klauspost/compress\n"
+        "      go mod tidy\n"
+        "  python-deps:\n"
+        "    override-build: |\n"
+        "      # Upgrade vulnerable transitive wheels\n"
+        "      UV_NO_CACHE=1 \\\n"
+        "      uv pip install --python $CRAFT_STAGE/py-venv/bin/python --upgrade \\\n"
+        '        "django>=5.2.16,<6.0" \\\n'
+        '        "cryptography>=46.0.7"\n'
+        "  rust-deps:\n"
+        "    override-build: |\n"
+        "      cargo update -p quinn-proto --precise 0.11.14\n"
+    )
+
+    def test_compares_overrides_across_go_python_and_rust(self):
+        overrides = uu.compare_dependency_overrides(
+            self.ROCKCRAFT_WITH_OVERRIDES, V("2026.5.3"), V("2026.8.3"), fake_fetch
+        )
+        by_pkg = {ov.package: ov for ov in overrides}
+        self.assertEqual(by_pkg["go"].status, "satisfied")
+        self.assertEqual((by_pkg["go"].before, by_pkg["go"].after), ("1.26.0", "1.27.0"))
+        self.assertEqual(by_pkg["golang.org/x/net"].status, "satisfied")
+        self.assertEqual(by_pkg["github.com/klauspost/compress"].status, "bumped")
+        self.assertEqual(by_pkg["django"].status, "satisfied")
+        self.assertEqual(by_pkg["cryptography"].status, "needed")
+        self.assertEqual(by_pkg["quinn-proto"].status, "satisfied")
+
+    def test_prunes_satisfied_overrides_and_preserves_needed_ones(self):
+        overrides = uu.compare_dependency_overrides(
+            self.ROCKCRAFT_WITH_OVERRIDES, V("2026.5.3"), V("2026.8.3"), fake_fetch
+        )
+        updated, pruned = uu.prune_rockcraft_overrides(self.ROCKCRAFT_WITH_OVERRIDES, overrides)
+        self.assertEqual(
+            [ov.package for ov in pruned],
+            ["go", "golang.org/x/net", "django", "quinn-proto"],
+        )
+        self.assertNotIn("go mod edit -go=1.26.2", updated)
+        self.assertNotIn("golang.org/x/net", updated)
+        self.assertIn("go get github.com/klauspost/compress", updated)
+        self.assertIn("go mod tidy", updated)
+        self.assertNotIn("django", updated)
+        self.assertIn('"cryptography>=46.0.7"', updated)
+        self.assertNotIn("quinn-proto", updated)
+
+    def test_pruning_last_python_item_strips_trailing_backslash(self):
+        rockcraft = (
+            "      UV_NO_CACHE=1 \\\n"
+            "      uv pip install --upgrade \\\n"
+            '        "cryptography>=46.0.7" \\\n'
+            '        "django>=5.2.16,<6.0"\n'
+        )
+        overrides = uu.compare_dependency_overrides(
+            rockcraft, V("2026.5.3"), V("2026.8.3"), fake_fetch
+        )
+        updated, pruned = uu.prune_rockcraft_overrides(rockcraft, overrides)
+        self.assertEqual([ov.package for ov in pruned], ["django"])
+        self.assertIn('        "cryptography>=46.0.7"\n', updated)
+        self.assertNotIn('"cryptography>=46.0.7" \\', updated)
+
+    def test_pruning_all_items_removes_entire_pip_block_and_go_mod_tidy(self):
+        rockcraft = (
+            "      go get golang.org/x/net@v0.61.0\n"
+            "      go mod tidy\n"
+            "      # Upgrade vulnerable transitive wheels\n"
+            "      UV_NO_CACHE=1 \\\n"
+            "      uv pip install --upgrade \\\n"
+            '        "django>=5.2.16,<6.0"\n'
+        )
+        overrides = uu.compare_dependency_overrides(
+            rockcraft, V("2026.5.3"), V("2026.8.3"), fake_fetch
+        )
+        updated, _ = uu.prune_rockcraft_overrides(rockcraft, overrides)
+        self.assertEqual(updated.strip(), "")
+
+    def test_tracks_already_removed_overrides_from_base_rockcraft(self):
+        base = 'name: authentik-server\nversion: "2026.5.3"\n      go get golang.org/x/net@v0.61.0\n'
+        head = 'name: authentik-server\nversion: "2026.8.3"\n'
+        overrides = uu.compare_dependency_overrides(
+            head, V("2026.5.3"), V("2026.8.3"), fake_fetch, base_rockcraft_text=base
+        )
+        self.assertEqual(len(overrides), 1)
+        self.assertEqual(overrides[0].package, "golang.org/x/net")
+        self.assertEqual(overrides[0].status, "removed")
 
 
 class SanitizeTest(unittest.TestCase):
@@ -655,6 +875,42 @@ class MainTest(unittest.TestCase):
 
     def test_unknown_versions_are_rejected(self):
         self.assertEqual(self.run_main("--from", "2026.5.3", "--to", "2026.9.0"), 1)
+
+    def test_auto_detects_from_version_from_charmcraft_on_target_branch(self):
+        requested_urls = []
+
+        def tracking_http_get(url):
+            requested_urls.append(url)
+            return fake_http_get(url)
+
+        with patch.object(uu, "http_get", tracking_http_get):
+            self.assertEqual(self.run_main("--target-branch", "track/2026.5"), 0)
+        outputs = self.read_outputs()
+        self.assertEqual(outputs["from"], "2026.5.3")
+        self.assertEqual(outputs["to"], "2026.8.3")
+        self.assertTrue(
+            any("canonical/authentik-server-operator/track/2026.5/charmcraft.yaml" in u for u in requested_urls)
+        )
+
+    def test_prune_overrides_updates_rockcraft_and_reports_pruned(self):
+        self.rockcraft.write_text(
+            'name: authentik-server\nversion: "2026.8.3"\n'
+            "parts:\n  go-server:\n    override-build: |\n"
+            "      go get golang.org/x/net@v0.61.0\n"
+            "      go get github.com/klauspost/compress@v1.18.7\n"
+        )
+        self.assertEqual(
+            self.run_main("--from-rockcraft", str(self.previous), "--prune-overrides"), 0
+        )
+        outputs = self.read_outputs()
+        self.assertEqual(outputs["pruned"], "true")
+        updated_rockcraft = self.rockcraft.read_text()
+        self.assertNotIn("golang.org/x/net", updated_rockcraft)
+        self.assertIn("github.com/klauspost/compress@v1.18.7", updated_rockcraft)
+        comment = (self.out / "pr_comment.md").read_text()
+        self.assertIn("### Dependency overrides in `rockcraft.yaml`", comment)
+        self.assertIn("**Satisfied upstream (removed)**", comment)
+        self.assertIn("Still needed", comment)
 
 
 if __name__ == "__main__":
