@@ -34,13 +34,12 @@ permissions:
 
 jobs:
   open-issues:
-    uses: canonical/identity-team/.github/workflows/_rock-upstream-charm-issues.yaml@feat/rock-upstream-upgrade
+    uses: canonical/identity-team/.github/workflows/_rock-upstream-charm-issues.yaml@main
     with:
       target-branch: ${{ inputs.target-branch || 'main' }}
       to-version: ${{ inputs.to-version }}
       image: ${{ inputs.image }}
       dry-run: ${{ inputs.dry-run }}
-      identity-team-ref: feat/rock-upstream-upgrade
     secrets:
       PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
