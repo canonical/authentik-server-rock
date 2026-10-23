@@ -24,9 +24,7 @@ permissions:
 
 jobs:
   analyse:
-    uses: canonical/identity-team/.github/workflows/_rock-upstream-upgrade.yaml@feat/rock-upstream-upgrade
-    with:
-      identity-team-ref: feat/rock-upstream-upgrade
+    uses: canonical/identity-team/.github/workflows/_rock-upstream-upgrade.yaml@main
     secrets:
       PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
