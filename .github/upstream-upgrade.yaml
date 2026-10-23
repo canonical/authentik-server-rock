@@ -1,0 +1,58 @@
+workload: authentik
+release_notes_path: "website/docs/releases/{year}/v{year}.{minor}.mdx"
+diffed_files:
+  - lifecycle/container/Dockerfile
+  - lifecycle/ak
+trusted_link_hosts:
+  - goauthentik.io
+  - docs.goauthentik.io
+enforce_sequential_series: true
+
+in_place_upgrade: >-
+  deploy the current `main` charm with `{{ FROM }}` against PostgreSQL (and
+  `authentik-worker`), create a test user/flow or OAuth client, then
+  `juju refresh {{ APP }} --resource {{ RESOURCE }}={{ IMAGE }}` and confirm
+  migrations succeed and existing data survives.
+
+charms:
+  - key: server
+    repo: canonical/authentik-server-operator
+    app: authentik-server
+    container: authentik
+    service: authentik-server
+    description: >-
+      Kubernetes charm running `/lifecycle/ak server` (HTTP 9000, HTTPS 9443,
+      metrics 9300). It configures authentik only through AUTHENTIK_* environment
+      variables in its Pebble layer, checks health on /-/health/live/ and
+      /-/health/ready/, requires PostgreSQL (pg-database) and ingress
+      (traefik-route), and optionally SMTP, logging and tracing. It calls the
+      authentik REST API with a bootstrap token to manage OAuth2 providers for
+      applications related over `oauth`, and shares the secret key and the
+      database settings with the worker charm over `authentik-cluster`.
+    files:
+      - charmcraft.yaml
+      - src/constants.py
+      - src/env_vars.py
+      - src/configs.py
+      - src/integrations.py
+      - src/services.py
+      - src/cli.py
+      - src/authentik_api.py
+
+  - key: worker
+    repo: canonical/authentik-worker-operator
+    app: authentik-worker
+    container: authentik
+    service: authentik-worker
+    description: >-
+      Kubernetes charm running `/lifecycle/ak worker` (metrics 9300) from the same
+      image. It receives AUTHENTIK_SECRET_KEY and the PostgreSQL settings from the
+      server charm over `authentik-cluster` and sets AUTHENTIK_* environment
+      variables in its Pebble layer.
+    files:
+      - charmcraft.yaml
+      - src/constants.py
+      - src/env_vars.py
+      - src/configs.py
+      - src/integrations.py
+      - src/services.py
