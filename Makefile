@@ -4,7 +4,7 @@ TRIVY_SEVERITY ?= HIGH,CRITICAL
 TRIVY_SKIP_FILES ?= /bin/pebble,/usr/bin/pebble
 ROCK_FILE ?= $(firstword $(wildcard authentik-server_*.rock))
 
-.PHONY: govulncheck scan-rock test clean
+.PHONY: govulncheck scan-rock clean
 
 govulncheck:
 	@if [ "$$(yq '.parts | has("go-server")' $(ROCKCRAFT_YAML))" = "true" ]; then \
@@ -35,9 +35,6 @@ scan-rock:
 		--ignorefile .trivyignore \
 		--skip-files "$(TRIVY_SKIP_FILES)" \
 		--exit-code 1
-
-test:
-	python3 -m unittest discover -s tests -v
 
 clean:
 	rm -rf .build

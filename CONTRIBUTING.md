@@ -59,7 +59,7 @@ To scan a specific rock file, set `ROCK_FILE`:
 make scan-rock ROCK_FILE=authentik-server_2026.5.3_amd64.rock
 ```
 
-In CI, the `unit-test` job runs `make govulncheck` and `make test` before the
+In CI, the `unit-test` job runs `make govulncheck` before the
 rock build starts. After the build, the `scan` job scans the image with Trivy
 and blocks publication if `HIGH` or `CRITICAL` vulnerabilities with available
 fixes exist.
@@ -74,34 +74,26 @@ Moving the rock to a new authentik release is driven by three pieces:
    are never auto-approved or automerged.
 2. The `Upstream upgrade` workflow comments on any pull request that changes
    the version in `rockcraft.yaml`. The comment compares the upstream files the
-   rock's build depends on (toolchains, package manager, Dockerfile) between
-   the two versions, and adds an LLM's judgement of the upgrade risk.
+   rock's build depends on (toolchains, package manager, Dockerfile) and any
+   manual dependency overrides in `rockcraft.yaml` between the two versions,
+   automatically removes overrides that are satisfied by the new upstream
+   lockfiles, and adds an LLM's judgement of the upgrade risk.
 3. The `Upstream charm upgrade issues` workflow opens an issue on each charm
    repository with the changes to make and the checks to run. It is run by
-   hand, with the version the charms are on, when they are ready to upgrade.
-   Nothing is filed when the rock publishes, because the rock follows upstream
-   more closely than the charms do. The workflow only previews the issues in
-   its run summary until its dry-run input is turned off.
+   hand when the charms are ready to upgrade, and reads the version the charms
+   are currently on from `charmcraft.yaml` on the target branch (`main` by
+   default). Nothing is filed when the rock publishes, because the rock follows
+   upstream more closely than the charms do.
+
+Both workflows delegate to the reusable workflows and shared tooling in
+[`canonical/identity-team`](https://github.com/canonical/identity-team/tree/main/tools/upstream-upgrade),
+configured for this repository by `.github/upstream-upgrade.yaml`.
 
 The LLM is shown the upstream release notes and build files, `rockcraft.yaml`,
 and the files of each charm that decide how it configures and runs authentik.
-Those files are listed per charm in `CHARMS` in `scripts/upstream_upgrade.py`.
+Those files are listed per charm in `.github/upstream-upgrade.yaml`.
 
 The LLM needs the `OPENROUTER_CI_KEY` or a `GEMINI_API_KEY` repository secret,
 and its model can be changed with the `OPENROUTER_MODEL` or `GEMINI_MODEL`
 repository variables. Without a key the pull request comment still shows the
 build comparison, and the charm issues workflow fails.
-
-To see what the tooling produces for a pair of versions, run it locally. It
-writes the pull request comment, and with an API key the charm issues, to
-`.artifacts/`:
-
-```shell
-python3 scripts/upstream_upgrade.py --from 2026.5.3 --to 2026.8.3
-```
-
-Run the tooling's tests with:
-
-```shell
-python3 -m unittest discover -s tests
-```
