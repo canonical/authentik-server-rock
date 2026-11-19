@@ -51,7 +51,7 @@ services:
 
 parts:
   # ── Runtime shared libraries (chisel slices) ────────────────────────────────
-  # Packages that have slice definitions in the ubuntu-26.04 chisel-releases.
+  # Packages that have slices in the ubuntu-26.04 chisel-releases.
   # rockcraft requires chisel slices and full packages to be in separate parts.
   runtime-libs:
     plugin: nil
@@ -86,7 +86,7 @@ parts:
       - libc-bin_nsswitch
 
   # ── Runtime shared libraries (full packages) ────────────────────────────────
-  # Packages that do NOT yet have slice definitions in ubuntu-26.04 chisel-releases
+  # Packages that do NOT yet have slices in ubuntu-26.04 chisel-releases
   # are staged in full here. rockcraft forbids mixing slices and plain packages
   # in a single stage-packages list, hence the separate part.
   runtime-libs-full:
