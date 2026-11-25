@@ -44,7 +44,7 @@ jobs:
     strategy:
       matrix:
         architecture: ${{ fromJson(needs.get-architectures.outputs.architectures) }}
-    uses: canonical/identity-team/.github/workflows/_rock-build.yaml@00995831ff788db43992012900820edf7967305f # v1.19.2
+    uses: canonical/identity-team/.github/workflows/_rock-build.yaml@e710e7f451e62c37e7038d45b6c3bfa7dbfb28c0 # v1.20.0
     with:
       structure-tests-enabled: true
       architecture: ${{ matrix.architecture }}
@@ -55,15 +55,17 @@ jobs:
       contents: read
     if: ${{ (github.ref == 'refs/heads/main') || startsWith(github.ref, 'refs/heads/release-') || (github.ref_type == 'tag') }}
     needs: build
-    uses: canonical/identity-team/.github/workflows/_rock-gh-publish-third-party.yaml@00995831ff788db43992012900820edf7967305f # v1.19.2
+    uses: canonical/identity-team/.github/workflows/_rock-gh-publish-third-party.yaml@e710e7f451e62c37e7038d45b6c3bfa7dbfb28c0 # v1.20.0
+    with:
+      candidate: true
 
   oci-publish:
     # only release to oci-factory in case of release
     if: ${{ (github.ref == 'refs/heads/main') || startsWith(github.ref, 'refs/heads/release-') }}
     needs:
       - build
-      - scan
-    uses: canonical/identity-team/.github/workflows/_rock-oci-publish.yaml@00995831ff788db43992012900820edf7967305f # v1.19.2
+      - promote
+    uses: canonical/identity-team/.github/workflows/_rock-oci-publish.yaml@e710e7f451e62c37e7038d45b6c3bfa7dbfb28c0 # v1.20.0
     with:
       edge-release: false
       eol-stable-release: "3 month"
@@ -80,7 +82,7 @@ jobs:
       actions: read
     if: ${{ (github.ref == 'refs/heads/main') || startsWith(github.ref, 'refs/heads/release-') || (github.ref_type == 'tag') }}
     needs: gh-publish
-    uses: canonical/identity-team/.github/workflows/_rock-scan.yaml@00995831ff788db43992012900820edf7967305f # v1.19.2
+    uses: canonical/identity-team/.github/workflows/_rock-scan.yaml@e710e7f451e62c37e7038d45b6c3bfa7dbfb28c0 # v1.20.0
     with:
       image: ${{ needs.gh-publish.outputs.image }}
       exit-code: '1'
@@ -88,15 +90,30 @@ jobs:
       ignore-unfixed: true
       trivyignores: '.trivyignore'
 
+  promote:
+    if: ${{ (github.ref == 'refs/heads/main') || startsWith(github.ref, 'refs/heads/release-') || (github.ref_type == 'tag') }}
+    needs: [gh-publish, scan]
+    permissions:
+      packages: write
+      contents: write
+    uses: canonical/identity-team/.github/workflows/_rock-promote.yaml@e710e7f451e62c37e7038d45b6c3bfa7dbfb28c0 # v1.20.0
+    with:
+      candidate-image: ${{ needs.gh-publish.outputs.image }}
+      release-tag: ${{ needs.gh-publish.outputs.version }}
+      target-repository: ${{ github.repository_owner }}/${{ needs.gh-publish.outputs.image-name }}
+      promote-stable: true
+      promote-latest: true
+      mark-latest: false
+
   oci-update-pr-server:
     permissions:
       contents: write
       pull-requests: write
-    needs: [gh-publish, scan]
+    needs: [promote]
     if: github.ref_type == 'tag'
-    uses: canonical/identity-team/.github/workflows/oci-update-pr.yaml@00995831ff788db43992012900820edf7967305f # v1.19.2
+    uses: canonical/identity-team/.github/workflows/oci-update-pr.yaml@e710e7f451e62c37e7038d45b6c3bfa7dbfb28c0 # v1.20.0
     with:
-        oci-image: ${{ needs.gh-publish.outputs.image }}
+        oci-image: ${{ needs.promote.outputs.image }}
         repository: canonical/authentik-server-operator
     secrets:
         PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
@@ -105,11 +122,11 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
-    needs: [gh-publish, scan]
+    needs: [promote]
     if: github.ref_type == 'tag'
-    uses: canonical/identity-team/.github/workflows/oci-update-pr.yaml@00995831ff788db43992012900820edf7967305f # v1.19.2
+    uses: canonical/identity-team/.github/workflows/oci-update-pr.yaml@e710e7f451e62c37e7038d45b6c3bfa7dbfb28c0 # v1.20.0
     with:
-        oci-image: ${{ needs.gh-publish.outputs.image }}
+        oci-image: ${{ needs.promote.outputs.image }}
         repository: canonical/authentik-worker-operator
     secrets:
         PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
