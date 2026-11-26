@@ -1,7 +1,7 @@
 name: authentik-server
 base: bare
 build-base: ubuntu@26.04
-version: "2026.5.8"
+version: "2026.5.9"
 summary: authentik identity provider server
 description: |
   authentik is an open-source Identity Provider focused on flexibility and
@@ -110,7 +110,7 @@ parts:
     plugin: nil
     source: https://github.com/goauthentik/authentik
     source-type: git
-    source-tag: version/2026.5.8
+    source-tag: version/2026.5.9
     source-depth: 1
     build-snaps:
       - node/24/stable
@@ -136,7 +136,7 @@ parts:
     plugin: go
     source: https://github.com/goauthentik/authentik
     source-type: git
-    source-tag: version/2026.5.8
+    source-tag: version/2026.5.9
     source-depth: 1
     build-snaps:
       - go/1.26/stable
@@ -155,13 +155,12 @@ parts:
       go get golang.org/x/sys@v0.49.0
       go get github.com/klauspost/compress@v1.18.7
       go get go.opentelemetry.io/otel@v1.44.0
-      go get github.com/go-jose/go-jose/v4@v4.1.6
       # GO-2026-6278 (GHSA-w67g-5rqw-f597): weak PRNG in websocket mask key;
       # fix exists only as this master pseudo-version (latest tag is v1.5.3).
       go get github.com/gorilla/websocket@v1.5.4-0.20240701034025-d67f41855da4
       go mod tidy
       mkdir -p "${CRAFT_PART_INSTALL}/usr/bin"
-      GOARCH="${CRAFT_ARCH_BUILD_FOR}" go build -ldflags="-s -w -X 'main.Version=2026.5.8'" -o "${CRAFT_PART_INSTALL}/usr/bin/authentik-server" ./cmd/server
+      GOARCH="${CRAFT_ARCH_BUILD_FOR}" go build -ldflags="-s -w -X 'main.Version=2026.5.9'" -o "${CRAFT_PART_INSTALL}/usr/bin/authentik-server" ./cmd/server
     stage:
       - usr/bin/authentik-server
 
@@ -173,7 +172,7 @@ parts:
     plugin: nil
     source: https://github.com/goauthentik/authentik
     source-type: git
-    source-tag: version/2026.5.8
+    source-tag: version/2026.5.9
     source-depth: 1
     build-snaps:
       - astral-uv/latest/stable
@@ -226,20 +225,10 @@ parts:
       UV_NO_BINARY_PACKAGE="cryptography" \
       CARGO_HOME="${CARGO_HOME}" \
         uv pip install --upgrade \
-          "aiohttp>=3.14.4" \
-          "anyio>=4.14.2" \
           "cryptography>=50.0.0" \
-          "djangorestframework>=3.18.2" \
-          "dnspython>=2.9.2" \
           "h2>=4.4.1" \
-          "httplib2>=0.32.0" \
           "idna>=3.15" \
-          "msgpack>=1.2.3" \
-          "oauthlib>=4.0.1" \
-          "pyasn1>=0.6.5" \
-          "setuptools>=83.0.0" \
-          "sqlparse>=0.6.0" \
-          "urllib3>=2.7.0"
+          "setuptools>=83.0.0"
 
       # Strip debug symbols from compiled extensions. Source-built Rust
       # extensions (cryptography._rust.abi3.so in particular) are ~300 MB
@@ -259,7 +248,7 @@ parts:
     plugin: nil
     source: https://github.com/goauthentik/authentik
     source-type: git
-    source-tag: version/2026.5.8
+    source-tag: version/2026.5.9
     source-depth: 1
     build-snaps:
       - go/1.26/stable
@@ -306,7 +295,7 @@ parts:
       - rust-binary
     source: https://github.com/goauthentik/authentik
     source-type: git
-    source-tag: version/2026.5.8
+    source-tag: version/2026.5.9
     source-depth: 1
     organize:
       # Workspace Python packages live at packages/ in the repo but need to be
