@@ -1,7 +1,7 @@
 name: authentik-server
 base: bare
 build-base: ubuntu@26.04
-version: "2026.5.8"
+version: "2026.5.9"
 summary: authentik identity provider server
 description: |
   authentik is an open-source Identity Provider focused on flexibility and
@@ -110,7 +110,7 @@ parts:
     plugin: nil
     source: https://github.com/goauthentik/authentik
     source-type: git
-    source-tag: version/2026.5.8
+    source-tag: version/2026.5.9
     source-depth: 1
     build-snaps:
       - node/24/stable
@@ -136,7 +136,7 @@ parts:
     plugin: go
     source: https://github.com/goauthentik/authentik
     source-type: git
-    source-tag: version/2026.5.8
+    source-tag: version/2026.5.9
     source-depth: 1
     build-snaps:
       - go/1.26/stable
@@ -161,7 +161,7 @@ parts:
       go get github.com/gorilla/websocket@v1.5.4-0.20240701034025-d67f41855da4
       go mod tidy
       mkdir -p "${CRAFT_PART_INSTALL}/usr/bin"
-      GOARCH="${CRAFT_ARCH_BUILD_FOR}" go build -ldflags="-s -w -X 'main.Version=2026.5.8'" -o "${CRAFT_PART_INSTALL}/usr/bin/authentik-server" ./cmd/server
+      GOARCH="${CRAFT_ARCH_BUILD_FOR}" go build -ldflags="-s -w -X 'main.Version=2026.5.9'" -o "${CRAFT_PART_INSTALL}/usr/bin/authentik-server" ./cmd/server
     stage:
       - usr/bin/authentik-server
 
@@ -173,7 +173,7 @@ parts:
     plugin: nil
     source: https://github.com/goauthentik/authentik
     source-type: git
-    source-tag: version/2026.5.8
+    source-tag: version/2026.5.9
     source-depth: 1
     build-snaps:
       - astral-uv/latest/stable
@@ -259,7 +259,7 @@ parts:
     plugin: nil
     source: https://github.com/goauthentik/authentik
     source-type: git
-    source-tag: version/2026.5.8
+    source-tag: version/2026.5.9
     source-depth: 1
     build-snaps:
       - go/1.26/stable
@@ -306,7 +306,7 @@ parts:
       - rust-binary
     source: https://github.com/goauthentik/authentik
     source-type: git
-    source-tag: version/2026.5.8
+    source-tag: version/2026.5.9
     source-depth: 1
     organize:
       # Workspace Python packages live at packages/ in the repo but need to be
